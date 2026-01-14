@@ -469,15 +469,52 @@ ip route get 8.8.8.8 | awk '{print $7}'
 
 ## VirtualBox Networking
 
-If you're running the server in Ubuntu VirtualBox and connecting from Windows host, see:
+If you're running the server in Ubuntu VirtualBox and connecting from Windows host:
 
-**[VIRTUALBOX_NETWORKING.md](VIRTUALBOX_NETWORKING.md)** - Complete VirtualBox networking guide
+### Port Forwarding (Easiest - Recommended)
 
-**Quick solution (Port Forwarding):**
-1. VirtualBox → VM Settings → Network → Port Forwarding
-2. Add: TCP, Host Port 8443, Guest Port 8443
-3. Server (VM): `python3 server/server.py --host 0.0.0.0 --port 8443`
-4. Client (Windows): `python client\client.py --server-host 127.0.0.1 --server-port 8443`
+1. **VirtualBox Manager:**
+   - Select your Ubuntu VM
+   - **Settings** → **Network** → **Adapter 1**
+   - Click **Advanced** → **Port Forwarding**
+   - Click **+** to add rule:
+     - **Name:** `remote-desktop`
+     - **Protocol:** `TCP`
+     - **Host Port:** `8443`
+     - **Guest Port:** `8443`
+   - Click **OK**
+
+2. **On Ubuntu VM (Server):**
+   ```bash
+   python3 server/server.py --host 0.0.0.0 --port 8443
+   ```
+
+3. **On Windows (Client):**
+   ```cmd
+   python client\client.py --server-host 127.0.0.1 --server-port 8443
+   ```
+   **Note:** Use `127.0.0.1` (localhost) because port forwarding makes VM accessible via localhost.
+
+### Bridged Networking (Alternative)
+
+1. **VirtualBox Manager:**
+   - VM **Settings** → **Network** → **Adapter 1**
+   - Change **Attached to:** to **`Bridged Adapter`**
+   - Select your network adapter
+   - Click **OK**
+
+2. **Restart Ubuntu VM**
+
+3. **Find VM IP:**
+   ```bash
+   hostname -I
+   # Example: 192.168.1.105
+   ```
+
+4. **Connect from Windows:**
+   ```cmd
+   python client\client.py --server-host 192.168.1.105 --server-port 8443
+   ```
 
 ## Quick Reference
 

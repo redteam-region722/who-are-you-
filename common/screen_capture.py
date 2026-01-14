@@ -208,6 +208,10 @@ class ScreenCapture:
             # Convert to JPEG
             buffer = io.BytesIO()
             img.save(buffer, format='JPEG', quality=self.quality, optimize=True)
+            
+            # Increment frame ID for every frame captured
+            self.frame_id += 1
+            
             return buffer.getvalue()
         except Exception as e:
             error_msg = str(e)

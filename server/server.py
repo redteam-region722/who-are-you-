@@ -42,37 +42,57 @@ class RemoteDesktopServer:
         self.clients = {}
         self.frame_buffer = {}
         
-    def create_ssl_context(self) -> ssl.SSLContext:
+    def create_ssl_context(self):
         """Create SSL context for secure connection"""
-        context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+        # Check if certificates exist
+        has_certs = SERVER_CERT.exists() and SERVER_KEY.exists()
+        logger.info(f"Server certificate check: SERVER_CERT={SERVER_CERT.exists()}, SERVER_KEY={SERVER_KEY.exists()}")
+        print(f"Server certificate check: SERVER_CERT={SERVER_CERT.exists()}, SERVER_KEY={SERVER_KEY.exists()}")
+        sys.stdout.flush()
         
-        # Load server certificate and key
-        if SERVER_CERT.exists() and SERVER_KEY.exists():
-            context.load_cert_chain(str(SERVER_CERT), str(SERVER_KEY))
-        else:
+        if not has_certs:
             logger.warning("Server certificates not found. Using unencrypted connection.")
+            print("Server: Using unencrypted connection (no certificates)")
+            sys.stdout.flush()
             return None
+        
+        # Certificates exist - create SSL context
+        context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+        context.load_cert_chain(str(SERVER_CERT), str(SERVER_KEY))
         
         # Load CA certificate for client verification
         if CA_CERT.exists():
             context.load_verify_locations(str(CA_CERT))
             context.verify_mode = ssl.CERT_OPTIONAL
         
+        logger.info("Server: Using SSL/TLS connection (certificates found)")
+        print("Server: Using SSL/TLS connection (certificates found)")
+        sys.stdout.flush()
         return context
     
     async def handle_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         """Handle a client connection"""
-        client_addr = writer.get_extra_info('peername')
-        client_id = f"{client_addr[0]}:{client_addr[1]}"
+        client_id = "unknown"
+        frames_received = 0
+        
+        try:
+            client_addr = writer.get_extra_info('peername')
+            client_id = f"{client_addr[0]}:{client_addr[1]}"
+        except Exception as e:
+            logger.error(f"Error getting client address: {e}")
+            print(f"ERROR getting client address: {e}")
+            client_id = "unknown"
         
         logger.info(f"Client connected: {client_id}")
+        print(f"Client connected: {client_id}")  # Also print to stdout for immediate visibility
+        sys.stdout.flush()  # Force flush to ensure output appears
+        
         self.clients[client_id] = {
             'reader': reader,
             'writer': writer,
             'frame_buffer': {}
         }
         
-        frames_received = 0
         try:
             logger.debug(f"Starting message loop for {client_id}")
             # Small delay to ensure connection is fully established before reading
@@ -136,18 +156,20 @@ class RemoteDesktopServer:
                     
                     # Read message data
                     try:
-                        logger.debug(f"Reading {length} bytes from {client_id}")
+                        if frames_received < 5:
+                            logger.debug(f"Reading {length} bytes from {client_id} (frame #{frames_received + 1})")
                         data = await asyncio.wait_for(reader.readexactly(length), timeout=60.0)
-                        logger.debug(f"Received {len(data)} bytes from {client_id}")
+                        if frames_received < 5:
+                            logger.debug(f"Received {len(data)} bytes from {client_id} (frame #{frames_received + 1})")
                     except asyncio.TimeoutError:
-                        logger.warning(f"Timeout reading {length} bytes from {client_id}")
+                        logger.warning(f"Timeout reading {length} bytes from {client_id} after {frames_received} frames")
                         break
                     except asyncio.IncompleteReadError as ire:
                         partial_len = len(ire.partial) if hasattr(ire, 'partial') and ire.partial else 0
-                        logger.info(f"Client {client_id} disconnected (incomplete read: expected {length}, got {partial_len})")
+                        logger.info(f"Client {client_id} disconnected (incomplete read: expected {length}, got {partial_len}) after {frames_received} frames")
                         break
                     except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError) as e:
-                        logger.info(f"Client {client_id} connection reset while reading: {e}")
+                        logger.info(f"Client {client_id} connection reset while reading: {e} (after {frames_received} frames)")
                         break
                     
                     if not data:
@@ -162,8 +184,9 @@ class RemoteDesktopServer:
                         msg_type, frame_id, is_delta, delta_rect, frame_data = FrameEncoder.decode_frame(data)
                         
                         frames_received += 1
-                        if frames_received % 10 == 0:
-                            logger.debug(f"Received {frames_received} frames from {client_id}")
+                        if frames_received <= 5 or frames_received % 10 == 0:
+                            logger.info(f"Received frame {frame_id} from {client_id} (total: {frames_received}, type: {msg_type.name}, size: {len(frame_data)} bytes)")
+                            print(f"Received frame {frame_id} from {client_id} (total: {frames_received})")  # Also print to stdout
                         
                         if msg_type == MessageType.SCREEN_FRAME:
                             # Full frame
@@ -228,8 +251,11 @@ class RemoteDesktopServer:
             logger.error(f"Error handling client {client_id}: {type(e).__name__}: {e} (received {frames_received} frames)")
             import traceback
             logger.error(f"Traceback: {traceback.format_exc()}")
+            print(f"ERROR handling client {client_id}: {e}")  # Also print to stdout
+            traceback.print_exc()  # Print to stdout as well
         finally:
             logger.info(f"Cleaning up client {client_id} (total frames received: {frames_received})")
+            print(f"Cleaning up client {client_id} (total frames received: {frames_received})")  # Also print to stdout
             if client_id in self.clients:
                 del self.clients[client_id]
             if client_id in self.frame_buffer:
@@ -240,19 +266,47 @@ class RemoteDesktopServer:
                     await writer.wait_closed()
             except Exception as cleanup_err:
                 logger.debug(f"Error during cleanup for {client_id}: {cleanup_err}")
+                print(f"Error during cleanup for {client_id}: {cleanup_err}")  # Also print to stdout
     
     async def start_server(self):
         """Start the server"""
         ssl_context = self.create_ssl_context()
         
+        async def client_handler(reader, writer):
+            """Wrapper to catch any exceptions in handle_client"""
+            print("=== CLIENT HANDLER CALLED ===")  # Immediate visibility
+            sys.stdout.flush()
+            logger.info("=== CLIENT HANDLER CALLED ===")
+            try:
+                await self.handle_client(reader, writer)
+            except Exception as e:
+                logger.error(f"Unhandled exception in client_handler: {type(e).__name__}: {e}")
+                print(f"CRITICAL ERROR in client_handler: {e}")
+                import traceback
+                logger.error(f"Traceback: {traceback.format_exc()}")
+                traceback.print_exc()
+                try:
+                    if not writer.is_closing():
+                        writer.close()
+                        await writer.wait_closed()
+                except:
+                    pass
+        
+        ssl_mode = "SSL/TLS" if ssl_context else "UNENCRYPTED"
+        logger.info(f"Starting server on {self.host}:{self.port} ({ssl_mode})")
+        print(f"Starting server on {self.host}:{self.port} ({ssl_mode})")
+        sys.stdout.flush()
+        
         server = await asyncio.start_server(
-            self.handle_client,
+            client_handler,
             self.host,
             self.port,
             ssl=ssl_context if ssl_context else None
         )
         
-        logger.info(f"Server listening on {self.host}:{self.port}")
+        logger.info(f"Server listening on {self.host}:{self.port} ({ssl_mode})")
+        print(f"Server listening on {self.host}:{self.port} ({ssl_mode})")  # Also print to stdout
+        sys.stdout.flush()
         
         async with server:
             await server.serve_forever()

@@ -102,10 +102,21 @@ class RemoteDesktopClient:
         
     def create_ssl_context(self) -> Optional[ssl.SSLContext]:
         """Create SSL context for secure connection"""
+        # Check certificate existence
+        has_server_cert = SERVER_CERT.exists()
+        has_ca_cert = CA_CERT.exists()
+        
+        logger.info(f"Client certificate check: SERVER_CERT={has_server_cert}, CA_CERT={has_ca_cert}")
+        
         # If certificates don't exist, return None (unencrypted for testing)
-        if not SERVER_CERT.exists() and not CA_CERT.exists():
+        if not has_server_cert and not has_ca_cert:
             logger.warning("Certificates not found. Using unencrypted connection (testing only).")
+            print("Client: Using unencrypted connection (no certificates)")
             return None
+        
+        # Certificates exist - create SSL context
+        logger.info("Client: Using SSL/TLS connection (certificates found)")
+        print("Client: Using SSL/TLS connection (certificates found)")
         
         context = ssl.create_default_context(ssl.Purpose.SERVER_AUTH)
         context.check_hostname = False  # For self-signed certs
@@ -125,8 +136,10 @@ class RemoteDesktopClient:
         """Establish secure connection to server"""
         try:
             ssl_context = self.create_ssl_context()
+            ssl_mode = "SSL/TLS" if ssl_context else "UNENCRYPTED"
             
-            logger.info(f"Connecting to {self.server_host}:{self.server_port}")
+            logger.info(f"Connecting to {self.server_host}:{self.server_port} ({ssl_mode})")
+            print(f"Connecting to {self.server_host}:{self.server_port} ({ssl_mode})")
             
             self.reader, self.writer = await asyncio.open_connection(
                 self.server_host,
@@ -134,11 +147,15 @@ class RemoteDesktopClient:
                 ssl=ssl_context if ssl_context else None
             )
             
-            logger.info("Connected to server")
+            logger.info(f"Connected to server ({ssl_mode})")
+            print(f"Connected to server ({ssl_mode})")
             return True
             
         except Exception as e:
-            logger.error(f"Connection failed: {e}")
+            logger.error(f"Connection failed: {type(e).__name__}: {e}")
+            print(f"Connection failed: {type(e).__name__}: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
             return False
     
     async def send_frame(self, frame_data: bytes, frame_id: int, 
@@ -175,8 +192,13 @@ class RemoteDesktopClient:
                 return
             
             # Write both in one operation to ensure atomicity
-            self.writer.write(length_bytes + encoded)
-            await self.writer.drain()
+            try:
+                self.writer.write(length_bytes + encoded)
+                await self.writer.drain()
+            except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError, OSError) as e:
+                logger.warning(f"Connection lost while sending frame {frame_id}: {e}")
+                self.writer = None
+                raise
             
             # Verify connection is still open
             if self.writer.is_closing():
