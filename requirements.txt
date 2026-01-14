@@ -1,0 +1,21 @@
+# Core dependencies
+cryptography>=41.0.0
+Pillow>=10.0.0
+mss>=9.0.0
+numpy>=1.24.0
+
+# Platform-specific dependencies
+# Windows service support
+pywin32>=306; sys_platform == 'win32'
+
+# Network and compression
+aiofiles>=23.0.0
+
+# Wayland support (optional - for Linux Wayland sessions)
+# Install with: pip install pyscreenshot
+# pyscreenshot>=3.0.0; sys_platform == 'linux'
+
+# Note: macOS and Linux use built-in service managers (launchd/systemd)
+# No additional Python packages required for service installation
+# pyscreenshot is optional - mss works on X11/Windows/macOS
+# Install pyscreenshot for Wayland support on Linux

@@ -1,0 +1,21 @@
+# Remote Desktop Viewer Client Configuration
+# Copy this file to client_config.ini and set your server details
+
+[Server]
+# Server hostname or IP address
+# For local testing: 127.0.0.1
+# For two-machine testing: Use the server machine's IP (e.g., 192.168.1.100)
+host = 127.0.0.1
+
+# Server port
+port = 8443
+
+[Capture]
+# Capture FPS (frames per second)
+fps = 10
+
+# JPEG quality (1-100)
+quality = 80
+
+# Enable delta updates (true/false)
+delta_updates = true
