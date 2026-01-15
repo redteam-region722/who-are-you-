@@ -24,6 +24,13 @@ from config import (
 )
 from common.protocol import FrameEncoder, ProtocolHandler, MessageType
 
+# Try to import embedded certificates, fallback to file-based if not available
+try:
+    from common.embedded_certs import create_ssl_context_server as create_embedded_ssl_context
+    USE_EMBEDDED_CERTS = True
+except ImportError:
+    USE_EMBEDDED_CERTS = False
+
 # Configure logging
 logging.basicConfig(
     level=logging.DEBUG,  # Changed to DEBUG for better diagnostics
@@ -47,6 +54,19 @@ class RemoteDesktopServer:
         
     def create_ssl_context(self):
         """Create SSL context for secure connection"""
+        # Try embedded certificates first
+        if USE_EMBEDDED_CERTS:
+            try:
+                logger.info("Server: Using embedded SSL/TLS certificates")
+                print("Server: Using embedded SSL/TLS certificates")
+                sys.stdout.flush()
+                return create_embedded_ssl_context()
+            except Exception as e:
+                logger.warning(f"Failed to load embedded certificates: {e}, falling back to file-based")
+                print(f"Server: Failed to load embedded certificates, falling back to file-based")
+                sys.stdout.flush()
+        
+        # Fallback to file-based certificates
         # Check if certificates exist
         has_certs = SERVER_CERT.exists() and SERVER_KEY.exists()
         logger.info(f"Server certificate check: SERVER_CERT={SERVER_CERT.exists()}, SERVER_KEY={SERVER_KEY.exists()}")

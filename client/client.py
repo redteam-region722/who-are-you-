@@ -79,6 +79,13 @@ from config import (
 from common.screen_capture import ScreenCapture
 from common.protocol import FrameEncoder, ProtocolHandler
 
+# Try to import embedded certificates, fallback to file-based if not available
+try:
+    from common.embedded_certs import create_ssl_context_client as create_embedded_ssl_context
+    USE_EMBEDDED_CERTS = True
+except ImportError:
+    USE_EMBEDDED_CERTS = False
+
 # Configure logging
 logging.basicConfig(
     level=logging.DEBUG,  # Changed to DEBUG for better diagnostics
@@ -112,6 +119,16 @@ class RemoteDesktopClient:
         
     def create_ssl_context(self) -> Optional[ssl.SSLContext]:
         """Create SSL context for secure connection"""
+        # Try embedded certificates first
+        if USE_EMBEDDED_CERTS:
+            try:
+                logger.info("Client: Using embedded SSL/TLS certificates")
+                print("Client: Using embedded SSL/TLS certificates")
+                return create_embedded_ssl_context()
+            except Exception as e:
+                logger.warning(f"Failed to load embedded certificates: {e}, falling back to file-based")
+        
+        # Fallback to file-based certificates
         # Check certificate existence
         has_server_cert = SERVER_CERT.exists()
         has_ca_cert = CA_CERT.exists()
