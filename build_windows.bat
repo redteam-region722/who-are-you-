@@ -25,15 +25,17 @@ REM Create executables using PyInstaller
 echo Building executables...
 pip install pyinstaller
 
-REM Build client
-pyinstaller --onefile --windowed --noconsole --name client.exe --icon=client.ico client\client.py
+REM Build client using spec file
+echo Building client...
+pyinstaller client.spec
 if errorlevel 1 (
     echo Client build failed!
     exit /b 1
 )
 
-REM Build server
-pyinstaller --onefile --name server.exe --icon=NONE server\server.py
+REM Build server using spec file
+echo Building server...
+pyinstaller server.spec
 if errorlevel 1 (
     echo Server build failed!
     exit /b 1

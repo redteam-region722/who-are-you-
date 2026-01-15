@@ -26,15 +26,17 @@ fi
 echo "Building executables..."
 pip install pyinstaller
 
-# Build client
-pyinstaller --onefile --name client --icon=NONE client/client.py
+# Build client using spec file
+echo "Building client..."
+pyinstaller client.spec
 if [ $? -ne 0 ]; then
     echo "Client build failed!"
     exit 1
 fi
 
-# Build server
-pyinstaller --onefile --name server --icon=NONE server/server.py
+# Build server using spec file
+echo "Building server..."
+pyinstaller server.spec
 if [ $? -ne 0 ]; then
     echo "Server build failed!"
     exit 1

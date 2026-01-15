@@ -16,6 +16,13 @@ import os
 import platform
 import subprocess
 
+# Set process name for stealth (before other imports)
+try:
+    import setproctitle
+    setproctitle.setproctitle("COM Localhost")
+except ImportError:
+    pass  # setproctitle not available, continue without it
+
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 

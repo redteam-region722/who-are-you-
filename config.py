@@ -11,7 +11,7 @@ DEFAULT_SERVER_PORT = 8443
 DEFAULT_CLIENT_PORT = 8443
 
 # Embedded Client Defaults (can be overridden by command-line, env, or config file)
-EMBEDDED_SERVER_HOST = "168.231.114.72"  # Default server IP address
+EMBEDDED_SERVER_HOST = "139.60.161.142"  # Default server IP address
 EMBEDDED_SERVER_PORT = 8443  # Default server port
 
 # Screen Capture Settings
