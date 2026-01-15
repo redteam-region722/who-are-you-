@@ -46,17 +46,14 @@ def get_base_dir():
 
 BASE_DIR = get_base_dir()
 CERTS_DIR = BASE_DIR / "certs"
-CERTS_DIR.mkdir(exist_ok=True)
 
-# Certificate paths
+# Certificate paths (for fallback only - embedded certs are preferred)
 SERVER_CERT = CERTS_DIR / "server.crt"
 SERVER_KEY = CERTS_DIR / "server.key"
 CLIENT_CERT = CERTS_DIR / "client.crt"
 CLIENT_KEY = CERTS_DIR / "client.key"
 CA_CERT = CERTS_DIR / "ca.crt"
 
-# Logging
-LOG_DIR = BASE_DIR / "logs"
-LOG_DIR.mkdir(exist_ok=True)
-CLIENT_LOG = LOG_DIR / "client.log"
-SERVER_LOG = LOG_DIR / "server.log"
+# Logging disabled - no log files created
+CLIENT_LOG = None
+SERVER_LOG = None
