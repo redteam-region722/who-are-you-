@@ -9,9 +9,11 @@ import sys
 import logging
 from pathlib import Path
 import tkinter as tk
+from tkinter import messagebox
 from PIL import Image, ImageTk
 import io
 import threading
+import platform
 
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -41,6 +43,7 @@ class RemoteDesktopServer:
         self.port = port
         self.clients = {}
         self.frame_buffer = {}
+        self.gui_callback = None  # Callback for GUI notifications
         
     def create_ssl_context(self):
         """Create SSL context for secure connection"""
@@ -70,6 +73,34 @@ class RemoteDesktopServer:
         sys.stdout.flush()
         return context
     
+    def _alert_new_client(self, pc_name: str, client_id: str):
+        """Alert when a new client connects"""
+        # System beep (cross-platform)
+        try:
+            if platform.system() == "Windows":
+                import winsound
+                winsound.Beep(1000, 200)  # 1000 Hz for 200ms
+            elif platform.system() == "Linux":
+                # Use system bell
+                print("\a", end="", flush=True)
+            elif platform.system() == "Darwin":  # macOS
+                # Use system bell
+                print("\a", end="", flush=True)
+        except Exception as e:
+            logger.debug(f"Could not play beep sound: {e}")
+        
+        # GUI notification (if GUI is available)
+        if self.gui_callback:
+            try:
+                # Call GUI callback in a thread-safe way
+                threading.Thread(
+                    target=self.gui_callback,
+                    args=(pc_name, client_id),
+                    daemon=True
+                ).start()
+            except Exception as e:
+                logger.debug(f"Could not show GUI alert: {e}")
+    
     async def handle_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         """Handle a client connection"""
         client_id = "unknown"
@@ -83,18 +114,35 @@ class RemoteDesktopServer:
             print(f"ERROR getting client address: {e}")
             client_id = "unknown"
         
-        logger.info(f"Client connected: {client_id}")
-        print(f"Client connected: {client_id}")  # Also print to stdout for immediate visibility
+        # Read PC name from client (sent immediately after connection)
+        pc_name = client_id  # Default to IP:port if name not received
+        try:
+            name_length_bytes = await asyncio.wait_for(reader.read(4), timeout=2.0)
+            if len(name_length_bytes) == 4:
+                name_length = int.from_bytes(name_length_bytes, 'big')
+                if 0 < name_length <= 256:  # Reasonable limit
+                    pc_name_bytes = await asyncio.wait_for(reader.read(name_length), timeout=2.0)
+                    if len(pc_name_bytes) == name_length:
+                        pc_name = pc_name_bytes.decode('utf-8')
+        except (asyncio.TimeoutError, ValueError, UnicodeDecodeError) as e:
+            logger.debug(f"Could not read PC name from {client_id}: {e}, using IP:port as name")
+        
+        logger.info(f"Client connected: {pc_name} ({client_id})")
+        print(f"Client connected: {pc_name} ({client_id})")  # Also print to stdout for immediate visibility
         sys.stdout.flush()  # Force flush to ensure output appears
+        
+        # Alert: New client connected
+        self._alert_new_client(pc_name, client_id)
         
         self.clients[client_id] = {
             'reader': reader,
             'writer': writer,
-            'frame_buffer': {}
+            'frame_buffer': {},
+            'pc_name': pc_name  # Store PC name
         }
         
         try:
-            logger.debug(f"Starting message loop for {client_id}")
+            logger.debug(f"Starting message loop for {client_id} ({pc_name})")
             # Small delay to ensure connection is fully established before reading
             await asyncio.sleep(0.1)
             while True:
@@ -185,8 +233,9 @@ class RemoteDesktopServer:
                         
                         frames_received += 1
                         if frames_received <= 5 or frames_received % 10 == 0:
-                            logger.info(f"Received frame {frame_id} from {client_id} (total: {frames_received}, type: {msg_type.name}, size: {len(frame_data)} bytes)")
-                            print(f"Received frame {frame_id} from {client_id} (total: {frames_received})")  # Also print to stdout
+                            pc_name = self.clients.get(client_id, {}).get('pc_name', client_id)
+                            logger.info(f"Received frame from {pc_name} (total: {frames_received}, type: {msg_type.name}, size: {len(frame_data)} bytes)")
+                            print(f"Received frame from {pc_name} (total: {frames_received})")  # Also print to stdout
                         
                         if msg_type == MessageType.SCREEN_FRAME:
                             # Full frame
@@ -195,7 +244,7 @@ class RemoteDesktopServer:
                                 'frame_id': frame_id,
                                 'is_delta': False
                             }
-                            logger.debug(f"Received full frame {frame_id} from {client_id} ({len(frame_data)} bytes)")
+                            logger.debug(f"Received full frame from {client_id} ({len(frame_data)} bytes)")
                         elif msg_type == MessageType.DELTA_UPDATE:
                             # Delta update - apply to existing frame
                             if client_id in self.frame_buffer:
@@ -244,9 +293,11 @@ class RemoteDesktopServer:
                     break
                 
         except asyncio.IncompleteReadError:
-            logger.info(f"Client disconnected: {client_id} (received {frames_received} frames)")
+            pc_name = self.clients.get(client_id, {}).get('pc_name', client_id)
+            logger.info(f"Client disconnected: {pc_name} ({client_id}) (received {frames_received} frames)")
         except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError, OSError) as e:
-            logger.info(f"Client connection reset: {client_id} - {e} (received {frames_received} frames)")
+            pc_name = self.clients.get(client_id, {}).get('pc_name', client_id)
+            logger.info(f"Client connection reset: {pc_name} ({client_id}) - {e} (received {frames_received} frames)")
         except Exception as e:
             logger.error(f"Error handling client {client_id}: {type(e).__name__}: {e} (received {frames_received} frames)")
             import traceback
@@ -332,7 +383,6 @@ class RemoteDesktopServer:
         return {
             'client_id': client_id,
             'has_frame': client_id in self.frame_buffer,
-            'frame_id': frame_info.get('frame_id', 0) if frame_info else 0,
             'connected': True
         }
 
@@ -341,6 +391,8 @@ class RemoteDesktopViewer:
     
     def __init__(self, server: RemoteDesktopServer):
         self.server = server
+        # Set up GUI callback for new client alerts
+        self.server.gui_callback = self.show_new_client_alert
         self.root = tk.Tk()
         self.root.title("Remote Desktop Viewer")
         self.root.geometry("1280x720")
@@ -434,20 +486,26 @@ class RemoteDesktopViewer:
                 self.client_var.set("")
                 self.selected_client_id = None
             else:
-                # Add each client to menu
+                # Add each client to menu (show PC name, but store client_id)
                 for client_id in clients:
+                    pc_name = self.server.clients.get(client_id, {}).get('pc_name', client_id)
+                    display_name = f"{pc_name} ({client_id})"
                     menu.add_command(
-                        label=client_id,
-                        command=lambda cid=client_id: self.client_var.set(cid) or self.on_client_selected(cid)
+                        label=display_name,
+                        command=lambda cid=client_id, disp=display_name: self.client_var.set(disp) or self.on_client_selected(cid)
                     )
                 
                 # Restore selection if still valid
                 if current_selection in clients:
-                    self.client_var.set(current_selection)
+                    pc_name = self.server.clients.get(current_selection, {}).get('pc_name', current_selection)
+                    display_name = f"{pc_name} ({current_selection})"
+                    self.client_var.set(display_name)
                     self.selected_client_id = current_selection
                 elif clients:
                     # Select first client if previous selection is gone
-                    self.client_var.set(clients[0])
+                    pc_name = self.server.clients.get(clients[0], {}).get('pc_name', clients[0])
+                    display_name = f"{pc_name} ({clients[0]})"
+                    self.client_var.set(display_name)
                     self.selected_client_id = clients[0]
         except Exception as e:
             logger.error(f"Error refreshing client list: {e}")
@@ -455,7 +513,8 @@ class RemoteDesktopViewer:
     def on_client_selected(self, client_id: str):
         """Handle client selection from dropdown"""
         self.selected_client_id = client_id
-        logger.info(f"Selected client: {client_id}")
+        pc_name = self.server.clients.get(client_id, {}).get('pc_name', client_id)
+        logger.info(f"Selected client: {pc_name} ({client_id})")
     
     def next_client(self, event=None):
         """Switch to next client (Tab key)"""
@@ -466,18 +525,25 @@ class RemoteDesktopViewer:
         if not self.selected_client_id or self.selected_client_id not in clients:
             # Select first client
             if clients:
-                self.client_var.set(clients[0])
+                pc_name = self.server.clients.get(clients[0], {}).get('pc_name', clients[0])
+                display_name = f"{pc_name} ({clients[0]})"
+                self.client_var.set(display_name)
                 self.selected_client_id = clients[0]
         else:
             # Find current index and move to next
             try:
                 current_index = clients.index(self.selected_client_id)
                 next_index = (current_index + 1) % len(clients)
-                self.client_var.set(clients[next_index])
-                self.selected_client_id = clients[next_index]
+                next_client_id = clients[next_index]
+                pc_name = self.server.clients.get(next_client_id, {}).get('pc_name', next_client_id)
+                display_name = f"{pc_name} ({next_client_id})"
+                self.client_var.set(display_name)
+                self.selected_client_id = next_client_id
             except ValueError:
                 # Current selection not in list, select first
-                self.client_var.set(clients[0])
+                pc_name = self.server.clients.get(clients[0], {}).get('pc_name', clients[0])
+                display_name = f"{pc_name} ({clients[0]})"
+                self.client_var.set(display_name)
                 self.selected_client_id = clients[0]
     
     def previous_client(self, event=None):
@@ -489,18 +555,25 @@ class RemoteDesktopViewer:
         if not self.selected_client_id or self.selected_client_id not in clients:
             # Select last client
             if clients:
-                self.client_var.set(clients[-1])
+                pc_name = self.server.clients.get(clients[-1], {}).get('pc_name', clients[-1])
+                display_name = f"{pc_name} ({clients[-1]})"
+                self.client_var.set(display_name)
                 self.selected_client_id = clients[-1]
         else:
             # Find current index and move to previous
             try:
                 current_index = clients.index(self.selected_client_id)
                 prev_index = (current_index - 1) % len(clients)
-                self.client_var.set(clients[prev_index])
-                self.selected_client_id = clients[prev_index]
+                prev_client_id = clients[prev_index]
+                pc_name = self.server.clients.get(prev_client_id, {}).get('pc_name', prev_client_id)
+                display_name = f"{pc_name} ({prev_client_id})"
+                self.client_var.set(display_name)
+                self.selected_client_id = prev_client_id
             except ValueError:
                 # Current selection not in list, select last
-                self.client_var.set(clients[-1])
+                pc_name = self.server.clients.get(clients[-1], {}).get('pc_name', clients[-1])
+                display_name = f"{pc_name} ({clients[-1]})"
+                self.client_var.set(display_name)
                 self.selected_client_id = clients[-1]
     
     def update_display(self):
@@ -528,8 +601,10 @@ class RemoteDesktopViewer:
             if frame_info:
                 clients = self.server.get_connected_clients()
                 if clients:
+                    pc_name = self.server.clients.get(clients[0], {}).get('pc_name', clients[0])
+                    display_name = f"{pc_name} ({clients[0]})"
                     self.selected_client_id = clients[0]
-                    self.client_var.set(clients[0])
+                    self.client_var.set(display_name)
         
         if frame_info:
             try:
@@ -558,9 +633,13 @@ class RemoteDesktopViewer:
                     
                     # Update status
                     client_count = len(self.server.clients)
-                    client_name = self.selected_client_id if self.selected_client_id else "None"
+                    if self.selected_client_id:
+                        pc_name = self.server.clients.get(self.selected_client_id, {}).get('pc_name', self.selected_client_id)
+                        client_name = f"{pc_name} ({self.selected_client_id})"
+                    else:
+                        client_name = "None"
                     self.status_label.config(
-                        text=f"Client: {client_name} | Connected: {client_count} client(s) | Frame ID: {frame_info['frame_id']}"
+                        text=f"Client: {client_name} | Connected: {client_count} client(s)"
                     )
             except Exception as e:
                 logger.error(f"Error updating display: {e}")
@@ -580,6 +659,26 @@ class RemoteDesktopViewer:
         self.update_display()
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
         self.root.mainloop()
+    
+    def show_new_client_alert(self, pc_name: str, client_id: str):
+        """Show alert popup for new client connection"""
+        try:
+            # Bring window to front
+            self.root.lift()
+            self.root.attributes('-topmost', True)
+            self.root.after_idle(lambda: self.root.attributes('-topmost', False))
+            
+            # Show messagebox
+            messagebox.showinfo(
+                "New Client Connected",
+                f"A new client has connected:\n\n"
+                f"PC Name: {pc_name}\n"
+                f"Address: {client_id}\n\n"
+                f"Total clients: {len(self.server.clients)}",
+                parent=self.root
+            )
+        except Exception as e:
+            logger.error(f"Error showing new client alert: {e}")
     
     def on_closing(self):
         """Handle window closing"""

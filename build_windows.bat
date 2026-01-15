@@ -26,7 +26,7 @@ echo Building executables...
 pip install pyinstaller
 
 REM Build client
-pyinstaller --onefile --windowed --console --name client.exe --icon=client.ico client\client.py
+pyinstaller --onefile --windowed --noconsole --name client.exe --icon=client.ico client\client.py
 if errorlevel 1 (
     echo Client build failed!
     exit /b 1

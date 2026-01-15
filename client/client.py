@@ -70,6 +70,8 @@ def suppress_screenshot_notifications():
 suppress_screenshot_notifications()
 
 from config import (
+    EMBEDDED_SERVER_HOST,
+    EMBEDDED_SERVER_PORT,
     DEFAULT_CLIENT_PORT, CLIENT_CERT, CLIENT_KEY, CA_CERT, SERVER_CERT,
     CAPTURE_FPS, ENABLE_DELTA_UPDATES, DELTA_THRESHOLD, CLIENT_LOG,
     SCREEN_QUALITY, CAPTURE_ALL_DISPLAYS
@@ -99,6 +101,14 @@ class RemoteDesktopClient:
         self.capture = None
         self.running = False
         self.reconnect_delay = 5
+        # Get PC name (hostname)
+        try:
+            self.pc_name = socket.gethostname()
+        except:
+            try:
+                self.pc_name = platform.node()
+            except:
+                self.pc_name = "Unknown"
         
     def create_ssl_context(self) -> Optional[ssl.SSLContext]:
         """Create SSL context for secure connection"""
@@ -149,6 +159,17 @@ class RemoteDesktopClient:
             
             logger.info(f"Connected to server ({ssl_mode})")
             print(f"Connected to server ({ssl_mode})")
+            
+            # Send PC name to server
+            try:
+                pc_name_bytes = self.pc_name.encode('utf-8')
+                name_length = len(pc_name_bytes).to_bytes(4, 'big')
+                self.writer.write(name_length + pc_name_bytes)
+                await self.writer.drain()
+                logger.info(f"Sent PC name to server: {self.pc_name}")
+            except Exception as e:
+                logger.warning(f"Failed to send PC name to server: {e}")
+            
             return True
             
         except Exception as e:
@@ -182,8 +203,8 @@ class RemoteDesktopClient:
             # Send frame length first, then frame data
             length_bytes = len(encoded).to_bytes(4, 'big')
             
-            # Debug: Log frame size for troubleshooting
-            logger.debug(f"Sending frame {frame_id}: length_prefix={len(encoded)} bytes (hex: {length_bytes.hex()}), original_frame={len(frame_data)} bytes")
+            # Debug: Log frame size for troubleshooting (frame ID removed from display)
+            logger.debug(f"Sending frame: length_prefix={len(encoded)} bytes, original_frame={len(frame_data)} bytes")
             
             # Verify length bytes are valid
             if len(encoded) > 50 * 1024 * 1024:
@@ -196,7 +217,7 @@ class RemoteDesktopClient:
                 self.writer.write(length_bytes + encoded)
                 await self.writer.drain()
             except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError, OSError) as e:
-                logger.warning(f"Connection lost while sending frame {frame_id}: {e}")
+                logger.warning(f"Connection lost while sending frame: {e}")
                 self.writer = None
                 raise
             
@@ -397,30 +418,40 @@ def main():
     
     # Try to get server host/port from various sources (in order of priority)
     server_host = None
-    server_port = DEFAULT_CLIENT_PORT
+    server_port = None
+    port_explicitly_set = False
     
     # Priority 1: Command-line arguments
     if args.server_host:
         server_host = args.server_host
     if args.server_port:
         server_port = args.server_port
+        port_explicitly_set = True
     
     # Priority 2: Environment variables
     if not server_host:
         server_host = os.getenv('RDS_SERVER_HOST')
-    if not args.server_port:
+    if not port_explicitly_set:
         env_port = os.getenv('RDS_SERVER_PORT')
         if env_port:
             try:
                 server_port = int(env_port)
+                port_explicitly_set = True
             except ValueError:
                 pass
     
     # Priority 3: Configuration file
     if not server_host:
-        config_file = Path(__file__).parent.parent / 'client_config.ini'
+        # For executables, check in executable directory; for scripts, check project root
+        if getattr(sys, 'frozen', False):
+            # Running as executable - check in executable directory
+            config_file = Path(sys.executable).parent / 'client_config.ini'
+        else:
+            # Running as script - check in project root
+            config_file = Path(__file__).parent.parent / 'client_config.ini'
+        
+        # Fallback: also check in current working directory
         if not config_file.exists():
-            # Also check in current directory (for executables)
             config_file = Path('client_config.ini')
         
         if config_file.exists():
@@ -430,19 +461,24 @@ def main():
                 if 'Server' in config:
                     if not server_host:
                         server_host = config['Server'].get('host')
-                    if not args.server_port:
+                    if not port_explicitly_set:
                         port_str = config['Server'].get('port')
                         if port_str:
                             try:
                                 server_port = int(port_str)
+                                port_explicitly_set = True
                             except ValueError:
                                 pass
             except Exception as e:
                 logger.warning(f"Failed to read config file: {e}")
     
-    # Final fallback: require server-host
+    # Priority 4: Embedded defaults (fallback)
     if not server_host:
-        parser.error("Server host is required. Provide --server-host, set RDS_SERVER_HOST environment variable, or create client_config.ini with [Server] host = <IP>")
+        server_host = EMBEDDED_SERVER_HOST
+        logger.info(f"Using embedded default server host: {server_host}")
+    if not port_explicitly_set:
+        server_port = EMBEDDED_SERVER_PORT
+        logger.info(f"Using embedded default server port: {server_port}")
     
     args.server_host = server_host
     args.server_port = server_port

@@ -2,12 +2,17 @@
 Configuration settings for Remote Desktop Viewer
 """
 import os
+import sys
 from pathlib import Path
 
 # Network Configuration
 DEFAULT_SERVER_HOST = "0.0.0.0"
 DEFAULT_SERVER_PORT = 8443
 DEFAULT_CLIENT_PORT = 8443
+
+# Embedded Client Defaults (can be overridden by command-line, env, or config file)
+EMBEDDED_SERVER_HOST = "168.231.114.72"  # Default server IP address
+EMBEDDED_SERVER_PORT = 8443  # Default server port
 
 # Screen Capture Settings
 CAPTURE_FPS = 10  # Frames per second
@@ -28,8 +33,18 @@ SERVICE_NAME = "RemoteDesktopViewer"
 SERVICE_DISPLAY_NAME = "Remote Desktop Viewer Client"
 SERVICE_DESCRIPTION = "Background service for remote desktop viewing"
 
-# Paths
-BASE_DIR = Path(__file__).parent
+# Paths - Handle both script execution and PyInstaller executables
+def get_base_dir():
+    """Get the base directory, handling both script and executable execution"""
+    if getattr(sys, 'frozen', False):
+        # Running as PyInstaller bundle - use directory containing the executable
+        base_dir = Path(sys.executable).parent
+    else:
+        # Running as script - use directory containing config.py
+        base_dir = Path(__file__).parent
+    return base_dir
+
+BASE_DIR = get_base_dir()
 CERTS_DIR = BASE_DIR / "certs"
 CERTS_DIR.mkdir(exist_ok=True)
 
