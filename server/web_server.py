@@ -78,13 +78,18 @@ def get_clients():
     
     clients = []
     for client_id, client_info in async_server.clients.items():
-        state = client_states.get(client_id, {'disabled': False, 'webcam_active': False, 'control_active': False})
+        # Ensure client has state entry (initialize if missing)
+        if client_id not in client_states:
+            client_states[client_id] = {'disabled': False, 'webcam_active': False, 'control_active': False}
+        
+        state = client_states[client_id]
         clients.append({
             'id': client_id,
             'name': client_info.get('pc_name', client_id),
             'disabled': state.get('disabled', False),
             'webcam_active': state.get('webcam_active', False),
-            'control_active': state.get('control_active', False)
+            'control_active': state.get('control_active', False),
+            'display_count': client_info.get('display_count', 1)
         })
     return jsonify(clients)
 
@@ -198,7 +203,11 @@ def toggle_control(client_id):
         logger.warning(f"Client {client_id} not found in async_server.clients")
         return jsonify({'error': 'Client not found'}), 404
     
-    state = client_states.get(client_id, {'disabled': False, 'webcam_active': False, 'control_active': False})
+    # Ensure client has state entry (initialize if missing)
+    if client_id not in client_states:
+        client_states[client_id] = {'disabled': False, 'webcam_active': False, 'control_active': False}
+    
+    state = client_states[client_id]
     logger.info(f"Current control state for {client_id}: {state.get('control_active', False)}")
     
     # Send control start/stop signal
@@ -253,8 +262,9 @@ def toggle_control(client_id):
             logger.error("Async event loop not available or not running")
             return jsonify({'error': 'Server not ready'}), 500
         
+        # Toggle the state
         state['control_active'] = not state.get('control_active', False)
-        client_states[client_id] = state
+        # State is already in client_states dict, so changes are persisted
         logger.info(f"Updated control state for {client_id}: {state['control_active']}")
         
     except Exception as e:
@@ -349,6 +359,69 @@ def handle_get_clients():
                 'disabled': state.get('disabled', False)
             })
     emit('clients_list', {'clients': clients})
+
+
+@socketio.on('control_input')
+def handle_control_input(data):
+    """Handle control input from web client (mouse/keyboard)"""
+    try:
+        client_id = data.get('client_id')
+        input_data = data.get('input')
+        
+        if not client_id or not input_data:
+            logger.warning("Invalid control input data")
+            return
+        
+        if not async_server or client_id not in async_server.clients:
+            logger.warning(f"Client {client_id} not found for control input")
+            return
+        
+        # Check if control is active for this client
+        state = client_states.get(client_id, {})
+        if not state.get('control_active', False):
+            logger.warning(f"Control not active for client {client_id}")
+            return
+        
+        # Forward control input to client
+        client_info = async_server.clients[client_id]
+        writer = client_info.get('writer')
+        
+        if not writer or writer.is_closing():
+            logger.warning(f"No writer available for client {client_id}")
+            return
+        
+        # Create control input message
+        import json
+        msg_data = json.dumps(input_data).encode('utf-8')
+        msg = struct.pack('!BI', int(MessageType.CONTROL_INPUT), len(msg_data)) + msg_data
+        
+        # Send message using asyncio.run_coroutine_threadsafe
+        async def send_control_input():
+            try:
+                length_bytes = len(msg).to_bytes(4, 'big')
+                writer.write(length_bytes + msg)
+                await writer.drain()
+                return True
+            except Exception as e:
+                logger.error(f"Error sending control input: {e}")
+                return False
+        
+        # Schedule in async event loop
+        if async_loop and async_loop.is_running():
+            future = asyncio.run_coroutine_threadsafe(send_control_input(), async_loop)
+            try:
+                result = future.result(timeout=0.5)
+                if not result:
+                    logger.error(f"Failed to send control input to {client_id}")
+            except Exception as e:
+                logger.error(f"Error waiting for control input send: {e}")
+        else:
+            logger.error("Async event loop not available")
+            
+    except Exception as e:
+        logger.error(f"Error handling control input: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
 
 
 def run_web_server(host='0.0.0.0', port=5000):

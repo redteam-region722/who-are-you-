@@ -7,11 +7,15 @@ import ssl
 import argparse
 import sys
 import logging
+import warnings
 from pathlib import Path
 import io
 import threading
 import platform
 import datetime
+
+# Suppress specific warnings and errors
+warnings.filterwarnings('ignore', category=DeprecationWarning)
 
 # Try to import tkinter (optional - only needed for GUI mode)
 try:
@@ -50,8 +54,43 @@ logging.basicConfig(
 )
 
 # Suppress eventlet connection errors (they're harmless)
-logging.getLogger('eventlet.wsgi').setLevel(logging.ERROR)
-logging.getLogger('eventlet.greenio').setLevel(logging.ERROR)
+logging.getLogger('eventlet.wsgi').setLevel(logging.CRITICAL)
+logging.getLogger('eventlet.greenio').setLevel(logging.CRITICAL)
+logging.getLogger('eventlet.hubs').setLevel(logging.CRITICAL)
+logging.getLogger('eventlet.hubs.selects').setLevel(logging.CRITICAL)
+logging.getLogger('eventlet').setLevel(logging.CRITICAL)
+
+# Custom stderr filter to suppress eventlet ConnectionResetError tracebacks
+class EventletErrorFilter:
+    """Filter to suppress harmless eventlet connection errors"""
+    def __init__(self, original_stderr):
+        self.original_stderr = original_stderr
+        self.buffer = []
+        self.in_traceback = False
+        
+    def write(self, text):
+        # Check if this is a ConnectionResetError traceback from eventlet
+        if 'ConnectionResetError' in text and 'eventlet' in text:
+            self.in_traceback = True
+            return
+        elif 'Removing descriptor:' in text:
+            # This is the end of the eventlet error
+            self.in_traceback = False
+            return
+        elif self.in_traceback:
+            # Skip lines that are part of the traceback
+            if text.strip().startswith('File ') or text.strip().startswith('return ') or \
+               'Traceback' in text or '^^^^^^^' in text or text.strip() == '':
+                return
+        
+        # Write everything else normally
+        self.original_stderr.write(text)
+    
+    def flush(self):
+        self.original_stderr.flush()
+
+# Install the filter
+sys.stderr = EventletErrorFilter(sys.stderr)
 
 logger = logging.getLogger(__name__)
 
@@ -166,6 +205,16 @@ class RemoteDesktopServer:
         except (asyncio.TimeoutError, ValueError, UnicodeDecodeError) as e:
             logger.debug(f"Could not read PC name from {client_id}: {e}, using IP:port as name")
         
+        # Read display count from client (sent immediately after PC name)
+        display_count = 1  # Default to 1 display
+        try:
+            display_count_bytes = await asyncio.wait_for(reader.read(4), timeout=2.0)
+            if len(display_count_bytes) == 4:
+                display_count = int.from_bytes(display_count_bytes, 'big')
+                logger.info(f"Client {pc_name} has {display_count} display(s)")
+        except (asyncio.TimeoutError, ValueError) as e:
+            logger.debug(f"Could not read display count from {client_id}: {e}, using default 1")
+        
         logger.info(f"Client connected: {pc_name} ({client_id})")
         print(f"Client connected: {pc_name} ({client_id})")  # Also print to stdout for immediate visibility
         sys.stdout.flush()  # Force flush to ensure output appears
@@ -177,7 +226,8 @@ class RemoteDesktopServer:
             'reader': reader,
             'writer': writer,
             'frame_buffer': {},
-            'pc_name': pc_name  # Store PC name
+            'pc_name': pc_name,  # Store PC name
+            'display_count': display_count  # Store display count
         }
         
         try:

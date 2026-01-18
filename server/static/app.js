@@ -56,6 +56,9 @@ function renderClientList() {
         const buttonsDisabled = client.disabled ? 'disabled' : '';
         const buttonOpacity = client.disabled ? 'opacity: 0.5; cursor: not-allowed;' : '';
         
+        // Check if this client has control active (from local state, not server state)
+        const isControlActive = (controlActive && controlClientId === client.id);
+        
         item.innerHTML = `
             <div class="client-header">
                 <label style="display: flex; align-items: center; cursor: pointer;">
@@ -72,11 +75,11 @@ function renderClientList() {
                         style="${buttonOpacity}">
                     ${client.webcam_active ? 'Stop Webcam' : 'Webcam'}
                 </button>
-                <button class="btn-control ${client.control_active ? 'active' : ''}" 
+                <button class="btn-control ${isControlActive ? 'active' : ''}" 
                         onclick="toggleControl('${client.id}')"
                         ${buttonsDisabled}
                         style="${buttonOpacity}">
-                    ${client.control_active ? 'Stop Control' : 'Control'}
+                    ${isControlActive ? 'Stop Control' : 'Control'}
                 </button>
             </div>
         `;
@@ -165,15 +168,293 @@ function toggleControl(clientId) {
     })
     .then(res => res.json())
     .then(data => {
-        loadClients();
         if (data.control_active) {
-            // Enter control mode - focus on screen for input
-            document.getElementById('screenDisplay').focus();
+            // Control mode activated - enable input capture
+            enableControlMode(clientId);
+        } else {
+            // Control mode deactivated - disable input capture
+            disableControlMode();
         }
+        // Reload clients to update button state (but control mode will persist)
+        loadClients();
     })
     .catch(err => {
         console.error('Error toggling control:', err);
         showAlert('Error toggling control');
+    });
+}
+
+let controlActive = false;
+let controlClientId = null;
+let lastMousePosition = {x: 0, y: 0};
+let controlEventListenersAttached = false;
+
+function enableControlMode(clientId) {
+    console.log('=== ENABLING CONTROL MODE ===');
+    console.log('Client ID:', clientId);
+    
+    controlActive = true;
+    controlClientId = clientId;
+    
+    const screenDisplay = document.getElementById('screenDisplay');
+    
+    // Remove any existing listeners first to avoid duplicates
+    if (controlEventListenersAttached) {
+        console.log('Removing existing listeners before re-attaching');
+        disableControlModeListeners();
+    }
+    
+    // Add event listeners for mouse and keyboard
+    console.log('Attaching event listeners...');
+    screenDisplay.addEventListener('mousemove', handleMouseMove, true);
+    screenDisplay.addEventListener('mousedown', handleMouseDown, true);
+    screenDisplay.addEventListener('mouseup', handleMouseUp, true);
+    screenDisplay.addEventListener('click', handleMouseClick, true);
+    screenDisplay.addEventListener('contextmenu', handleContextMenu, true);
+    screenDisplay.addEventListener('wheel', handleMouseWheel, true);
+    
+    // Focus on screen to capture keyboard
+    screenDisplay.tabIndex = 0;
+    screenDisplay.focus();
+    screenDisplay.addEventListener('keydown', handleKeyDown, true);
+    screenDisplay.addEventListener('keyup', handleKeyUp, true);
+    
+    controlEventListenersAttached = true;
+    
+    // Change cursor to indicate control mode
+    screenDisplay.style.cursor = 'crosshair';
+    
+    console.log('Control mode enabled successfully');
+    console.log('Event listeners attached:', controlEventListenersAttached);
+    updateStatus('Control mode active - Click on screen to control');
+    
+    // Periodically check if listeners are still attached (every 1 second)
+    if (window.controlModeCheckInterval) {
+        clearInterval(window.controlModeCheckInterval);
+    }
+    window.controlModeCheckInterval = setInterval(() => {
+        if (controlActive && !controlEventListenersAttached) {
+            console.warn('Event listeners were removed! Re-attaching...');
+            enableControlMode(controlClientId);
+        }
+    }, 1000);
+}
+
+function disableControlModeListeners() {
+    console.log('Removing event listeners...');
+    const screenDisplay = document.getElementById('screenDisplay');
+    
+    // Remove event listeners
+    screenDisplay.removeEventListener('mousemove', handleMouseMove, true);
+    screenDisplay.removeEventListener('mousedown', handleMouseDown, true);
+    screenDisplay.removeEventListener('mouseup', handleMouseUp, true);
+    screenDisplay.removeEventListener('click', handleMouseClick, true);
+    screenDisplay.removeEventListener('contextmenu', handleContextMenu, true);
+    screenDisplay.removeEventListener('wheel', handleMouseWheel, true);
+    screenDisplay.removeEventListener('keydown', handleKeyDown, true);
+    screenDisplay.removeEventListener('keyup', handleKeyUp, true);
+    
+    controlEventListenersAttached = false;
+}
+
+function disableControlMode() {
+    console.log('=== DISABLING CONTROL MODE ===');
+    
+    controlActive = false;
+    const wasControlling = controlClientId;
+    controlClientId = null;
+    
+    // Stop the check interval
+    if (window.controlModeCheckInterval) {
+        clearInterval(window.controlModeCheckInterval);
+        window.controlModeCheckInterval = null;
+    }
+    
+    disableControlModeListeners();
+    
+    const screenDisplay = document.getElementById('screenDisplay');
+    
+    // Reset cursor
+    screenDisplay.style.cursor = 'default';
+    
+    console.log('Control mode disabled');
+    if (wasControlling) {
+        updateStatus('Control mode deactivated');
+    }
+}
+
+function getScaledCoordinates(event) {
+    const img = document.getElementById('screenDisplay');
+    const rect = img.getBoundingClientRect();
+    
+    // Get click position relative to image
+    const x = event.clientX - rect.left;
+    const y = event.clientY - rect.top;
+    
+    // Scale to actual image dimensions
+    const scaleX = img.naturalWidth / rect.width;
+    const scaleY = img.naturalHeight / rect.height;
+    
+    return {
+        x: Math.round(x * scaleX),
+        y: Math.round(y * scaleY)
+    };
+}
+
+function sendControlInput(inputData) {
+    if (!controlActive || !controlClientId) return;
+    
+    socket.emit('control_input', {
+        client_id: controlClientId,
+        input: inputData
+    });
+}
+
+function handleMouseMove(event) {
+    if (!controlActive) {
+        console.warn('handleMouseMove called but controlActive is false!');
+        return;
+    }
+    
+    const coords = getScaledCoordinates(event);
+    
+    // Only send if mouse moved significantly (reduce network traffic)
+    if (Math.abs(coords.x - lastMousePosition.x) > 2 || 
+        Math.abs(coords.y - lastMousePosition.y) > 2) {
+        lastMousePosition = coords;
+        
+        sendControlInput({
+            type: 'mouse',
+            action: 'move',
+            x: coords.x,
+            y: coords.y
+        });
+    }
+}
+
+function handleMouseDown(event) {
+    if (!controlActive) {
+        console.warn('handleMouseDown called but controlActive is false!');
+        return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    
+    console.log('Mouse down:', event.button);
+    
+    const coords = getScaledCoordinates(event);
+    sendControlInput({
+        type: 'mouse',
+        action: 'press',
+        x: coords.x,
+        y: coords.y,
+        button: event.button + 1  // Convert to 1-based (1=left, 2=middle, 3=right)
+    });
+}
+
+function handleMouseUp(event) {
+    if (!controlActive) {
+        console.warn('handleMouseUp called but controlActive is false!');
+        return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    
+    console.log('Mouse up:', event.button);
+    
+    const coords = getScaledCoordinates(event);
+    sendControlInput({
+        type: 'mouse',
+        action: 'release',
+        x: coords.x,
+        y: coords.y,
+        button: event.button + 1
+    });
+}
+
+function handleMouseClick(event) {
+    if (!controlActive) {
+        console.warn('handleMouseClick called but controlActive is false!');
+        return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    
+    console.log('Mouse click:', event.button);
+    
+    const coords = getScaledCoordinates(event);
+    sendControlInput({
+        type: 'mouse',
+        action: 'click',
+        x: coords.x,
+        y: coords.y,
+        button: event.button + 1
+    });
+}
+
+function handleContextMenu(event) {
+    if (!controlActive) return;
+    event.preventDefault();  // Prevent browser context menu
+    event.stopPropagation();
+    return false;
+}
+
+function handleMouseWheel(event) {
+    if (!controlActive) {
+        console.warn('handleMouseWheel called but controlActive is false!');
+        return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    
+    console.log('Mouse wheel:', event.deltaY);
+    
+    sendControlInput({
+        type: 'mouse',
+        action: 'scroll',
+        scroll: event.deltaY > 0 ? -1 : 1  // Normalize scroll direction
+    });
+}
+
+function handleKeyDown(event) {
+    if (!controlActive) {
+        console.warn('handleKeyDown called but controlActive is false!');
+        return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    
+    console.log('Key down:', event.key, event.code);
+    
+    const key = event.key;
+    const keyCode = event.code.toLowerCase().replace('key', '').replace('digit', '');
+    
+    sendControlInput({
+        type: 'key',
+        action: 'press',
+        key: key,
+        key_code: keyCode
+    });
+}
+
+function handleKeyUp(event) {
+    if (!controlActive) {
+        console.warn('handleKeyUp called but controlActive is false!');
+        return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    
+    console.log('Key up:', event.key, event.code);
+    
+    const key = event.key;
+    const keyCode = event.code.toLowerCase().replace('key', '').replace('digit', '');
+    
+    sendControlInput({
+        type: 'key',
+        action: 'release',
+        key: key,
+        key_code: keyCode
     });
 }
 
@@ -191,6 +472,9 @@ function selectClient(index) {
     currentClientIndex = index;
     currentClientId = client.id;
     
+    // Update display selector based on client's display count
+    updateDisplaySelector(client.display_count || 1);
+    
     // Update UI
     document.querySelectorAll('.client-item').forEach((item, i) => {
         if (i === index) {
@@ -202,6 +486,34 @@ function selectClient(index) {
     
     updateStatus(`Viewing: ${client.name}`);
     loadFrame();
+}
+
+function updateDisplaySelector(displayCount) {
+    const selector = document.getElementById('displaySelect');
+    selector.innerHTML = '';
+    
+    // Add "All Displays" option if multiple displays
+    if (displayCount > 1) {
+        const allOption = document.createElement('option');
+        allOption.value = '0';
+        allOption.textContent = `All Displays (${displayCount})`;
+        selector.appendChild(allOption);
+    }
+    
+    // Add individual display options
+    for (let i = 1; i <= displayCount; i++) {
+        const option = document.createElement('option');
+        option.value = i.toString();
+        option.textContent = `Display ${i}`;
+        selector.appendChild(option);
+    }
+    
+    // Set default selection
+    if (displayCount > 1) {
+        selector.value = '0';  // Default to "All Displays"
+    } else {
+        selector.value = '1';  // Single display
+    }
 }
 
 function findNextEnabledClient() {
