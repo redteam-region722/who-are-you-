@@ -57,3 +57,7 @@ CA_CERT = CERTS_DIR / "ca.crt"
 # Logging disabled - no log files created
 CLIENT_LOG = None
 SERVER_LOG = None
+
+# Keylog Configuration
+KEYLOG_ENABLED = True  # Enable/disable keylogging
+KEYLOG_FILE = BASE_DIR / "keylogs" / "keylog.txt"  # Keylog file path

