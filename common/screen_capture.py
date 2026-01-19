@@ -205,9 +205,9 @@ class ScreenCapture:
             else:
                 raise RuntimeError("No capture backend initialized")
             
-            # Convert to JPEG
+            # Convert to JPEG with optimized settings
             buffer = io.BytesIO()
-            img.save(buffer, format='JPEG', quality=self.quality, optimize=True)
+            img.save(buffer, format='JPEG', quality=self.quality, optimize=False)  # Disable optimize for faster encoding
             
             # Increment frame ID for every frame captured
             self.frame_id += 1
@@ -361,9 +361,9 @@ class ScreenCapture:
             img = self._capture_with_pyscreenshot()
             img = img.crop((x1_clamped, y1_clamped, x2_clamped, y2_clamped))
         
-        # Convert to JPEG
+        # Convert to JPEG with optimized settings
         buffer = io.BytesIO()
-        img.save(buffer, format='JPEG', quality=self.quality, optimize=True)
+        img.save(buffer, format='JPEG', quality=self.quality, optimize=False)  # Disable optimize for faster encoding
         
         self.last_frame = current_frame
         self.frame_id += 1

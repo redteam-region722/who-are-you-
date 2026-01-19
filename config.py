@@ -15,18 +15,18 @@ EMBEDDED_SERVER_HOST = "139.60.161.142"  # Default server IP address
 EMBEDDED_SERVER_PORT = 8443  # Default server port
 
 # Screen Capture Settings
-CAPTURE_FPS = 10  # Frames per second
-SCREEN_QUALITY = 80  # JPEG quality (1-100)
+CAPTURE_FPS = 15  # Frames per second (reduced from 10 for better responsiveness, but still efficient)
+SCREEN_QUALITY = 70  # JPEG quality (1-100) - reduced from 80 to save bandwidth
 MAX_FRAME_SIZE = (1920, 1080)  # Maximum resolution
 CAPTURE_ALL_DISPLAYS = True  # If True, capture all monitors; If False, capture single monitor
 
 # Delta Update Settings
-ENABLE_DELTA_UPDATES = True
+ENABLE_DELTA_UPDATES = False  # Disabled for stability - full frames are more reliable
 DELTA_THRESHOLD = 0.1  # Minimum change percentage to send update
 
 # Compression Settings
 ENABLE_COMPRESSION = True
-COMPRESSION_LEVEL = 6  # zlib compression level (0-9)
+COMPRESSION_LEVEL = 3  # zlib compression level (0-9) - reduced from 6 for faster compression
 
 # Service Configuration
 SERVICE_NAME = "RemoteDesktopViewer"

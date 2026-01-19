@@ -43,8 +43,8 @@ class FrameEncoder:
         """
         msg_type = int(MessageType.DELTA_UPDATE if is_delta else MessageType.SCREEN_FRAME)
         
-        # Compress frame data
-        compressed = zlib.compress(frame_data, level=6)
+        # Compress frame data with optimized compression level
+        compressed = zlib.compress(frame_data, level=3)  # Reduced from 6 for faster compression
         
         # Build header
         header = struct.pack('!BIB', msg_type, frame_id, 1 if is_delta else 0)
@@ -123,7 +123,7 @@ class ProtocolHandler:
     @staticmethod
     def create_webcam_frame(frame_data: bytes) -> bytes:
         """Create a webcam frame message"""
-        compressed = zlib.compress(frame_data, level=6)
+        compressed = zlib.compress(frame_data, level=3)  # Reduced from 6 for faster compression
         return struct.pack('!BI', int(MessageType.WEBCAM_FRAME), len(compressed)) + compressed
     
     @staticmethod
