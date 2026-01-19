@@ -26,7 +26,7 @@ class WebcamCapture:
         self.running = False
         self.cap = None
         self.thread = None
-        self.fps = 10  # Frames per second
+        self.fps = 8  # Reduced from 10 for less CPU usage
     
     def _capture_loop(self):
         """Internal capture loop"""
@@ -50,8 +50,9 @@ class WebcamCapture:
             
             # Set capture properties for lower load
             self.cap.set(cv2.CAP_PROP_FPS, self.fps)
-            self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)  # Lower resolution
+            self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)  # Lower resolution for less CPU
             self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+            self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # Minimize buffer for lower memory
             
             frame_interval = 1.0 / self.fps
             
@@ -65,9 +66,9 @@ class WebcamCapture:
                         time.sleep(frame_interval)
                         continue
                     
-                    # Convert frame to JPEG
+                    # Convert frame to JPEG with lower quality for less CPU
                     import cv2
-                    encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), 70]  # Lower quality for less load
+                    encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), 60]  # Reduced from 70 for less CPU usage
                     result, img_bytes = cv2.imencode('.jpg', frame, encode_param)
                     
                     if result and self.callback:

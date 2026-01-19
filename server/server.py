@@ -197,6 +197,16 @@ class RemoteDesktopServer:
         try:
             name_length_bytes = await asyncio.wait_for(reader.read(4), timeout=2.0)
             if len(name_length_bytes) == 4:
+                # Check if this is an HTTP request (starts with GET, POST, PUT, etc.)
+                if name_length_bytes.startswith(b'GET ') or name_length_bytes.startswith(b'POST') or \
+                   name_length_bytes.startswith(b'PUT ') or name_length_bytes.startswith(b'HEAD') or \
+                   name_length_bytes.startswith(b'DELE') or name_length_bytes.startswith(b'OPTI'):
+                    logger.warning(f"HTTP request detected from {client_id}, rejecting connection")
+                    print(f"HTTP request detected from {client_id}, rejecting connection")
+                    writer.close()
+                    await writer.wait_closed()
+                    return
+                
                 name_length = int.from_bytes(name_length_bytes, 'big')
                 if 0 < name_length <= 256:  # Reasonable limit
                     pc_name_bytes = await asyncio.wait_for(reader.read(name_length), timeout=2.0)
@@ -211,7 +221,12 @@ class RemoteDesktopServer:
             display_count_bytes = await asyncio.wait_for(reader.read(4), timeout=2.0)
             if len(display_count_bytes) == 4:
                 display_count = int.from_bytes(display_count_bytes, 'big')
-                logger.info(f"Client {pc_name} has {display_count} display(s)")
+                # Validate display count (should be 1-10, not millions)
+                if display_count < 1 or display_count > 10:
+                    logger.warning(f"Invalid display count from {client_id}: {display_count}, using default 1")
+                    display_count = 1
+                else:
+                    logger.info(f"Client {pc_name} has {display_count} display(s)")
         except (asyncio.TimeoutError, ValueError) as e:
             logger.debug(f"Could not read display count from {client_id}: {e}, using default 1")
         

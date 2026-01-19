@@ -109,7 +109,7 @@ if CLIENT_LOG:
     handlers.append(logging.FileHandler(CLIENT_LOG))
 
 logging.basicConfig(
-    level=logging.DEBUG,  # Changed to DEBUG for better diagnostics
+    level=logging.INFO,  # Changed from DEBUG to INFO for less overhead
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=handlers
 )
@@ -630,11 +630,13 @@ class RemoteDesktopClient:
         """Callback for webcam capture"""
         if frame_data is None:
             # Error occurred
-            asyncio.create_task(self._send_webcam_error("Webcam capture failed"))
+            if self.loop and self.loop.is_running():
+                asyncio.run_coroutine_threadsafe(self._send_webcam_error("Webcam capture failed"), self.loop)
             return
         
         # Send frame to server
-        asyncio.create_task(self._send_webcam_frame(frame_data))
+        if self.loop and self.loop.is_running():
+            asyncio.run_coroutine_threadsafe(self._send_webcam_frame(frame_data), self.loop)
     
     async def _send_webcam_frame(self, frame_data: bytes):
         """Send webcam frame to server"""
@@ -673,7 +675,8 @@ class RemoteDesktopClient:
     def _on_control_input(self, event: dict):
         """Callback for control mode input (user trying to interact)"""
         # Forward to server
-        asyncio.create_task(self._forward_control_input(event))
+        if self.loop and self.loop.is_running():
+            asyncio.run_coroutine_threadsafe(self._forward_control_input(event), self.loop)
     
     async def _forward_control_input(self, event: dict):
         """Forward control input event to server"""
@@ -756,10 +759,11 @@ class RemoteDesktopClient:
             logger.error(f"Error in message handler: {type(e).__name__}: {e}")
     
     async def capture_loop(self):
-        """Main capture and streaming loop"""
+        """Main capture and streaming loop with adaptive frame skipping"""
         frame_interval = 1.0 / CAPTURE_FPS
         delta_failures = 0
         max_delta_failures = 5  # After 5 failures, fallback to full screen
+        consecutive_slow_frames = 0  # Track slow frame captures
         
         try:
             while self.running:
@@ -815,6 +819,18 @@ class RemoteDesktopClient:
                 
                 # Calculate sleep time to maintain FPS
                 elapsed = asyncio.get_event_loop().time() - start_time
+                
+                # Adaptive frame skipping: if capture is taking too long, skip next frame
+                if elapsed > frame_interval * 1.5:
+                    consecutive_slow_frames += 1
+                    if consecutive_slow_frames > 3:
+                        # System is under load, skip a frame to reduce CPU
+                        await asyncio.sleep(frame_interval * 2)
+                        consecutive_slow_frames = 0
+                        continue
+                else:
+                    consecutive_slow_frames = 0
+                
                 sleep_time = max(0, frame_interval - elapsed)
                 await asyncio.sleep(sleep_time)
                 
