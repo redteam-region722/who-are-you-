@@ -291,13 +291,41 @@ function getScaledCoordinates(event) {
     const x = event.clientX - rect.left;
     const y = event.clientY - rect.top;
     
+    // Check if mouse is outside image bounds - return null to skip
+    if (x < 0 || y < 0 || x > rect.width || y > rect.height) {
+        console.debug('Mouse outside image bounds, skipping');
+        return null;
+    }
+    
+    // Validate image dimensions
+    if (!img.naturalWidth || !img.naturalHeight || !rect.width || !rect.height) {
+        console.warn('Image dimensions not available, skipping');
+        return null;
+    }
+    
     // Scale to actual image dimensions
     const scaleX = img.naturalWidth / rect.width;
     const scaleY = img.naturalHeight / rect.height;
     
+    // Validate scaling factors
+    if (!isFinite(scaleX) || !isFinite(scaleY) || scaleX <= 0 || scaleY <= 0) {
+        console.warn('Invalid scaling factors, skipping');
+        return null;
+    }
+    
+    const scaledX = Math.round(x * scaleX);
+    const scaledY = Math.round(y * scaleY);
+    
+    // Final validation - ensure coordinates are valid
+    if (scaledX < 0 || scaledY < 0 || !isFinite(scaledX) || !isFinite(scaledY)) {
+        console.warn('Invalid scaled coordinates, skipping');
+        return null;
+    }
+    
+    // Clamp to valid range
     return {
-        x: Math.round(x * scaleX),
-        y: Math.round(y * scaleY)
+        x: Math.max(0, Math.min(scaledX, img.naturalWidth - 1)),
+        y: Math.max(0, Math.min(scaledY, img.naturalHeight - 1))
     };
 }
 
@@ -317,6 +345,11 @@ function handleMouseMove(event) {
     }
     
     const coords = getScaledCoordinates(event);
+    
+    // Skip if coordinates are invalid (null or negative)
+    if (!coords || coords.x < 0 || coords.y < 0) {
+        return;
+    }
     
     // Only send if mouse moved significantly (reduce network traffic)
     if (Math.abs(coords.x - lastMousePosition.x) > 2 || 
@@ -343,6 +376,8 @@ function handleMouseDown(event) {
     console.log('Mouse down:', event.button);
     
     const coords = getScaledCoordinates(event);
+    if (!coords) return;  // Skip if invalid
+    
     sendControlInput({
         type: 'mouse',
         action: 'press',
@@ -363,6 +398,8 @@ function handleMouseUp(event) {
     console.log('Mouse up:', event.button);
     
     const coords = getScaledCoordinates(event);
+    if (!coords) return;  // Skip if invalid
+    
     sendControlInput({
         type: 'mouse',
         action: 'release',
@@ -383,6 +420,8 @@ function handleMouseClick(event) {
     console.log('Mouse click:', event.button);
     
     const coords = getScaledCoordinates(event);
+    if (!coords) return;  // Skip if invalid
+    
     sendControlInput({
         type: 'mouse',
         action: 'click',

