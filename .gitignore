@@ -29,6 +29,10 @@ certs/*.csr
 # User Configuration
 client_config.ini
 
+# Server Data
+server_data/
+deleted_clients.json
+
 # IDE
 .vscode/
 .idea/

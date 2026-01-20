@@ -61,3 +61,7 @@ SERVER_LOG = None
 # Keylog Configuration
 KEYLOG_ENABLED = True  # Enable/disable keylogging
 KEYLOG_FILE = BASE_DIR / "keylogs" / "keylog.txt"  # Keylog file path
+
+# Server Data Directory
+SERVER_DATA_DIR = BASE_DIR / "server_data"
+DELETED_CLIENTS_FILE = SERVER_DATA_DIR / "deleted_clients.json"  # Deleted clients persistence file

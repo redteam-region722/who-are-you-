@@ -9,6 +9,7 @@ let frameUpdateInterval = null;
 document.addEventListener('DOMContentLoaded', () => {
     setupEventListeners();
     loadClients();
+    loadDeletedClients();
     
     // Set up keyboard shortcuts
     document.addEventListener('keydown', handleKeyboard);
@@ -18,7 +19,10 @@ document.addEventListener('DOMContentLoaded', () => {
 });
 
 function setupEventListeners() {
-    document.getElementById('refreshBtn').addEventListener('click', loadClients);
+    document.getElementById('refreshBtn').addEventListener('click', () => {
+        loadClients();
+        loadDeletedClients();
+    });
     document.getElementById('displaySelect').addEventListener('change', handleDisplayChange);
 }
 
@@ -59,39 +63,6 @@ function renderClientList() {
         // Check if this client has control active (from local state, not server state)
         const isControlActive = (controlActive && controlClientId === client.id);
         
-        // Lock status indicator
-        let lockIndicator = '';
-        if (client.locked) {
-            const lockIcon = '🔒';
-            const lockText = client.lock_type === 'secure_desktop' ? 
-                'Locked (Secure Desktop)' : 'Locked';
-            lockIndicator = `<span style="color: #ff9800; font-size: 12px; margin-left: 10px;" title="${lockText}">${lockIcon}</span>`;
-        }
-        
-        // Lock/Unlock buttons
-        let lockUnlockButton = '';
-        if (client.locked && client.lock_type !== 'secure_desktop') {
-            // Show unlock button when locked
-            lockUnlockButton = `
-                <button class="btn-unlock" 
-                        onclick="showUnlockDialog('${client.id}', '${client.name}')"
-                        ${buttonsDisabled}
-                        style="${buttonOpacity}">
-                    Unlock
-                </button>
-            `;
-        } else if (!client.locked) {
-            // Show lock button when not locked
-            lockUnlockButton = `
-                <button class="btn-lock" 
-                        onclick="lockClient('${client.id}', '${client.name}')"
-                        ${buttonsDisabled}
-                        style="${buttonOpacity}">
-                    Lock
-                </button>
-            `;
-        }
-        
         item.innerHTML = `
             <div class="client-header">
                 <label style="display: flex; align-items: center; cursor: pointer;">
@@ -99,10 +70,9 @@ function renderClientList() {
                            onchange="toggleDisable('${client.id}', this.checked)">
                     <span style="margin-left: 5px; font-size: 12px; color: #aaa;">Disable</span>
                 </label>
-                <span class="client-name">${client.name}${lockIndicator}</span>
+                <span class="client-name">${client.name}</span>
             </div>
             <div class="client-actions">
-                ${lockUnlockButton}
                 <button class="btn-webcam ${client.webcam_active ? 'active' : ''}" 
                         onclick="toggleWebcam('${client.id}')"
                         ${buttonsDisabled}
@@ -114,6 +84,11 @@ function renderClientList() {
                         ${buttonsDisabled}
                         style="${buttonOpacity}">
                     ${isControlActive ? 'Stop Control' : 'Control'}
+                </button>
+                <button class="btn-delete" 
+                        onclick="deleteClient('${client.id}', '${client.name}')"
+                        style="background: #f44336; color: white; padding: 8px 16px; border: none; border-radius: 4px; cursor: pointer; font-size: 14px; margin-right: 8px;">
+                    Delete
                 </button>
             </div>
         `;
@@ -189,6 +164,110 @@ function toggleWebcam(clientId) {
         console.error('Error toggling webcam:', err);
         showAlert('No Service: Webcam not available');
         loadClients();
+    });
+}
+
+function deleteClient(clientId, clientName) {
+    if (!confirm(`Delete client "${clientName}"?\n\nDeleted clients will be hidden from the list until restored.`)) {
+        return;
+    }
+    
+    fetch(`/api/client/${clientId}/delete`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'}
+    })
+    .then(res => res.json())
+    .then(data => {
+        if (data.error) {
+            alert('Delete failed: ' + data.error);
+        } else {
+            // If current client was deleted, clear the display
+            if (currentClientId === clientId) {
+                document.getElementById('screenDisplay').style.display = 'none';
+                document.getElementById('noClients').style.display = 'block';
+                updateStatus('Client deleted');
+                currentClientId = null;
+                currentClientIndex = -1;
+            }
+            // Reload clients
+            loadClients();
+            loadDeletedClients();
+        }
+    })
+    .catch(err => {
+        console.error('Error deleting client:', err);
+        alert('Error deleting client');
+    });
+}
+
+function restoreClient(clientId, clientName) {
+    fetch(`/api/client/${clientId}/restore`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'}
+    })
+    .then(res => res.json())
+    .then(data => {
+        if (data.error) {
+            alert('Restore failed: ' + data.error);
+        } else {
+            // Reload both lists
+            loadClients();
+            loadDeletedClients();
+        }
+    })
+    .catch(err => {
+        console.error('Error restoring client:', err);
+        alert('Error restoring client');
+    });
+}
+
+function loadDeletedClients() {
+    console.log('Loading deleted clients...');
+    fetch('/api/client/deleted')
+    .then(res => {
+        console.log('Deleted clients response status:', res.status);
+        if (!res.ok) {
+            throw new Error(`HTTP error! status: ${res.status}`);
+        }
+        return res.json();
+    })
+    .then(deletedClients => {
+        console.log('Deleted clients received:', deletedClients);
+        const container = document.getElementById('deletedClientsList');
+        if (!container) {
+            console.error('deletedClientsList container not found!');
+            return;
+        }
+        
+        container.innerHTML = '';
+        
+        if (!deletedClients || deletedClients.length === 0) {
+            container.innerHTML = '<div style="padding: 10px; color: #888; text-align: center;">No deleted clients</div>';
+            return;
+        }
+        
+        deletedClients.forEach(client => {
+            const item = document.createElement('div');
+            item.className = 'client-item';
+            item.style.cssText = 'padding: 10px; border-bottom: 1px solid #444; cursor: pointer;';
+            
+            item.innerHTML = `
+                <div style="display: flex; justify-content: space-between; align-items: center;">
+                    <span class="client-name" style="color: #888;">${client.name}</span>
+                    <button class="btn-restore" 
+                            onclick="restoreClient('${client.id}', '${client.name}'); event.stopPropagation();"
+                            style="background: #4CAF50; color: white; padding: 6px 12px; border: none; border-radius: 4px; cursor: pointer; font-size: 12px;">
+                        Restore
+                    </button>
+                </div>
+            `;
+            
+            container.appendChild(item);
+        });
+        console.log(`Loaded ${deletedClients.length} deleted clients`);
+    })
+    .catch(err => {
+        console.error('Error loading deleted clients:', err);
     });
 }
 
@@ -747,6 +826,12 @@ socket.on('clients_list', (data) => {
     renderClientList();
 });
 
+socket.on('clients_updated', () => {
+    // Reload clients when updated
+    loadClients();
+    loadDeletedClients();
+});
+
 socket.on('frame_update', (data) => {
     if (data.client_id === currentClientId) {
         const img = document.getElementById('screenDisplay');
@@ -767,74 +852,6 @@ socket.on('webcam_error', (data) => {
     // Reset webcam button state - reload clients to update UI
     console.log('Reloading clients...');
     loadClients();
+    loadDeletedClients();
 });
 
-
-// Lock functionality
-function lockClient(clientId, clientName) {
-    if (!confirm(`Lock ${clientName}?`)) {
-        return;
-    }
-    
-    fetch(`/api/client/${clientId}/lock`, {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'}
-    })
-    .then(res => res.json())
-    .then(data => {
-        if (data.error) {
-            alert('Lock failed: ' + data.error);
-        } else {
-            alert('Lock request sent. Machine should lock shortly...');
-            // Reload clients after a moment to update lock status
-            setTimeout(() => loadClients(), 2000);
-        }
-    })
-    .catch(err => {
-        console.error('Error sending lock request:', err);
-        alert('Error sending lock request');
-    });
-}
-
-// Unlock functionality
-function showUnlockDialog(clientId, clientName) {
-    const password = prompt(`Enter password to unlock ${clientName}:`);
-    
-    if (password === null || password === '') {
-        return; // User cancelled
-    }
-    
-    // Send unlock request
-    fetch(`/api/client/${clientId}/unlock`, {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({password: password})
-    })
-    .then(res => res.json())
-    .then(data => {
-        if (data.error) {
-            alert('Unlock failed: ' + data.error);
-        } else {
-            alert('Unlock request sent. Please wait...');
-            // Reload clients after a moment
-            setTimeout(() => loadClients(), 2000);
-        }
-    })
-    .catch(err => {
-        console.error('Error sending unlock request:', err);
-        alert('Error sending unlock request');
-    });
-}
-
-// Listen for lock status updates
-socket.on('lock_status', (data) => {
-    console.log('Lock status update:', data);
-    
-    // Update client in local list
-    const client = clients.find(c => c.id === data.client_id);
-    if (client) {
-        client.locked = data.locked;
-        client.lock_type = data.lock_type;
-        renderClientList();
-    }
-});

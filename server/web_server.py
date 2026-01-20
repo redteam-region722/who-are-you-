@@ -34,7 +34,8 @@ async_server = None
 async_loop = None  # Store reference to the async event loop
 
 # Client state
-client_states = {}  # {client_id: {'disabled': bool, 'webcam_active': bool, 'control_active': bool, 'locked': bool, 'lock_type': str}}
+client_states = {}  # {client_id: {'disabled': bool, 'webcam_active': bool, 'control_active': bool}}
+deleted_clients = {}  # Store deleted clients: {client_id: {'name': pc_name}}
 
 
 def init_web_server(server_instance, event_loop=None):
@@ -63,34 +64,6 @@ def init_web_server(server_instance, event_loop=None):
     
     async_server.webcam_error_callback = webcam_error_handler
     
-    # Set up lock status callback
-    def lock_status_handler(client_id, is_locked, lock_type):
-        """Handle lock status updates from clients"""
-        try:
-            # Update client state
-            if client_id not in client_states:
-                client_states[client_id] = {
-                    'disabled': False,
-                    'webcam_active': False,
-                    'control_active': False,
-                    'locked': False,
-                    'lock_type': 'unknown'
-                }
-            
-            client_states[client_id]['locked'] = is_locked
-            client_states[client_id]['lock_type'] = lock_type
-            logger.info(f"Updated lock state for {client_id}: locked={is_locked}, type={lock_type}")
-            
-            # Emit to web clients
-            socketio.emit('lock_status', {
-                'client_id': client_id,
-                'locked': is_locked,
-                'lock_type': lock_type
-            }, namespace='/')
-        except Exception as e:
-            logger.error(f"Error handling lock status: {e}")
-    
-    async_server.lock_status_callback = lock_status_handler
 
 
 @app.route('/')
@@ -101,20 +74,26 @@ def index():
 
 @app.route('/api/clients')
 def get_clients():
-    """Get list of connected clients"""
+    """Get list of connected clients (excluding deleted ones)"""
     if not async_server:
         return jsonify([])
     
     clients = []
+    # Get deleted clients from both sources (sync them)
+    global deleted_clients
+    deleted_clients = async_server.deleted_clients
+    
     for client_id, client_info in async_server.clients.items():
+        # Skip deleted clients
+        if client_id in deleted_clients:
+            continue
+            
         # Ensure client has state entry (initialize if missing)
         if client_id not in client_states:
             client_states[client_id] = {
                 'disabled': False,
                 'webcam_active': False,
-                'control_active': False,
-                'locked': False,
-                'lock_type': 'unknown'
+                'control_active': False
             }
         
         state = client_states[client_id]
@@ -124,11 +103,36 @@ def get_clients():
             'disabled': state.get('disabled', False),
             'webcam_active': state.get('webcam_active', False),
             'control_active': state.get('control_active', False),
-            'display_count': client_info.get('display_count', 1),
-            'locked': state.get('locked', False),
-            'lock_type': state.get('lock_type', 'unknown')
+            'display_count': client_info.get('display_count', 1)
         })
     return jsonify(clients)
+
+
+@app.route('/api/client/deleted')
+def get_deleted_clients():
+    """Get list of deleted clients"""
+    if not async_server:
+        return jsonify([])
+    
+    global deleted_clients
+    deleted_clients = async_server.deleted_clients
+    
+    deleted_list = []
+    for client_id, deleted_info in deleted_clients.items():
+        # Use stored PC name, or try to get from active clients
+        name = deleted_info.get('name', client_id)
+        
+        # If client is currently connected, use current info
+        if client_id in async_server.clients:
+            client_info = async_server.clients[client_id]
+            name = client_info.get('pc_name', name)
+        
+        deleted_list.append({
+            'id': client_id,
+            'name': name
+        })
+    
+    return jsonify(deleted_list)
 
 
 @app.route('/api/client/<client_id>/disable', methods=['POST'])
@@ -138,131 +142,93 @@ def toggle_disable(client_id):
         client_states[client_id] = {
             'disabled': False,
             'webcam_active': False,
-            'control_active': False,
-            'locked': False,
-            'lock_type': 'unknown'
+            'control_active': False
         }
     
     client_states[client_id]['disabled'] = not client_states[client_id].get('disabled', False)
     return jsonify({'disabled': client_states[client_id]['disabled']})
 
 
-@app.route('/api/client/<client_id>/lock', methods=['POST'])
-def lock_client(client_id):
-    """Send lock request to client"""
-    logger.info(f"Lock requested for client: {client_id}")
+@app.route('/api/client/<client_id>/delete', methods=['POST'])
+def delete_client(client_id):
+    """Delete a client (add to deleted list)"""
+    if not async_server:
+        return jsonify({'error': 'Server not initialized'}), 500
     
-    if not async_server or client_id not in async_server.clients:
-        logger.warning(f"Client {client_id} not found")
-        return jsonify({'error': 'Client not found'}), 404
+    global deleted_clients
+    deleted_clients = async_server.deleted_clients
     
-    try:
-        client_info = async_server.clients[client_id]
+    # Get client info and PC name
+    client_info = async_server.clients.get(client_id, {})
+    pc_name = client_info.get('pc_name', client_id)
+    
+    # Add client to deleted list with PC name
+    async_server.deleted_clients[client_id] = {'name': pc_name}
+    deleted_clients[client_id] = {'name': pc_name}
+    
+    # Save to file
+    async_server._save_deleted_clients()
+    
+    logger.info(f"Client {client_id} ({pc_name}) added to deleted list")
+    
+    # Disconnect the client if they're currently connected
+    if client_id in async_server.clients:
+        # Get fresh client_info in case it was updated
+        client_info = async_server.clients.get(client_id, {})
         writer = client_info.get('writer')
-        
-        if not writer or writer.is_closing():
-            return jsonify({'error': 'Client not connected'}), 500
-        
-        # Create lock request message
-        msg = ProtocolHandler.create_lock_request()
-        
-        logger.info(f"Sending lock request to {client_id}")
-        
-        # Send message using asyncio.run_coroutine_threadsafe
-        async def send_lock():
-            try:
-                length_bytes = len(msg).to_bytes(4, 'big')
-                writer.write(length_bytes + msg)
-                await writer.drain()
-                logger.info(f"Lock request sent to {client_id}")
-                return True
-            except Exception as e:
-                logger.error(f"Error sending lock request: {e}")
-                return False
-        
-        # Schedule in async event loop
-        if async_loop and async_loop.is_running():
-            future = asyncio.run_coroutine_threadsafe(send_lock(), async_loop)
-            try:
-                result = future.result(timeout=2.0)
-                if not result:
-                    return jsonify({'error': 'Failed to send lock request'}), 500
-            except Exception as e:
-                logger.error(f"Error waiting for lock send: {e}")
-                return jsonify({'error': f'Send timeout: {str(e)}'}), 500
-        else:
-            logger.error("Async event loop not available")
-            return jsonify({'error': 'Server not ready'}), 500
-        
-        return jsonify({'success': True, 'message': 'Lock request sent'})
-        
-    except Exception as e:
-        logger.error(f"Error locking client: {e}")
-        import traceback
-        logger.error(traceback.format_exc())
-        return jsonify({'error': str(e)}), 500
+        if writer and not writer.is_closing():
+            logger.info(f"Disconnecting deleted client {client_id}")
+            # Close the connection in the async loop
+            async def close_connection():
+                try:
+                    if not writer.is_closing():
+                        writer.close()
+                        await writer.wait_closed()
+                except Exception as e:
+                    logger.debug(f"Error closing connection for deleted client: {e}")
+            
+            if async_loop and async_loop.is_running():
+                try:
+                    asyncio.run_coroutine_threadsafe(close_connection(), async_loop)
+                except Exception as e:
+                    logger.error(f"Error scheduling connection close: {e}")
+    
+    # Clear buffers for deleted client
+    if client_id in async_server.frame_buffer:
+        del async_server.frame_buffer[client_id]
+    if client_id in async_server.webcam_buffer:
+        del async_server.webcam_buffer[client_id]
+    
+    # Emit update to web clients
+    socketio.emit('clients_updated', {}, namespace='/')
+    
+    return jsonify({'success': True, 'message': 'Client deleted and disconnected'})
 
 
-@app.route('/api/client/<client_id>/unlock', methods=['POST'])
-def unlock_client(client_id):
-    """Send unlock request to client"""
-    logger.info(f"Unlock requested for client: {client_id}")
+@app.route('/api/client/<client_id>/restore', methods=['POST'])
+def restore_client(client_id):
+    """Restore a deleted client (remove from deleted list)"""
+    if not async_server:
+        return jsonify({'error': 'Server not initialized'}), 500
     
-    if not async_server or client_id not in async_server.clients:
-        logger.warning(f"Client {client_id} not found")
-        return jsonify({'error': 'Client not found'}), 404
+    global deleted_clients
+    deleted_clients = async_server.deleted_clients
     
-    try:
-        data = request.get_json()
-        password = data.get('password', '')
-        
-        if not password:
-            return jsonify({'error': 'Password required'}), 400
-        
-        client_info = async_server.clients[client_id]
-        writer = client_info.get('writer')
-        
-        if not writer or writer.is_closing():
-            return jsonify({'error': 'Client not connected'}), 500
-        
-        # Create unlock request message
-        msg = ProtocolHandler.create_unlock_request(password)
-        
-        logger.info(f"Sending unlock request to {client_id}")
-        
-        # Send message using asyncio.run_coroutine_threadsafe
-        async def send_unlock():
-            try:
-                length_bytes = len(msg).to_bytes(4, 'big')
-                writer.write(length_bytes + msg)
-                await writer.drain()
-                logger.info(f"Unlock request sent to {client_id}")
-                return True
-            except Exception as e:
-                logger.error(f"Error sending unlock request: {e}")
-                return False
-        
-        # Schedule in async event loop
-        if async_loop and async_loop.is_running():
-            future = asyncio.run_coroutine_threadsafe(send_unlock(), async_loop)
-            try:
-                result = future.result(timeout=2.0)
-                if not result:
-                    return jsonify({'error': 'Failed to send unlock request'}), 500
-            except Exception as e:
-                logger.error(f"Error waiting for unlock send: {e}")
-                return jsonify({'error': f'Send timeout: {str(e)}'}), 500
-        else:
-            logger.error("Async event loop not available")
-            return jsonify({'error': 'Server not ready'}), 500
-        
-        return jsonify({'success': True, 'message': 'Unlock request sent'})
-        
-    except Exception as e:
-        logger.error(f"Error unlocking client: {e}")
-        import traceback
-        logger.error(traceback.format_exc())
-        return jsonify({'error': str(e)}), 500
+    # Remove client from deleted list
+    if client_id in async_server.deleted_clients:
+        del async_server.deleted_clients[client_id]
+    if client_id in deleted_clients:
+        del deleted_clients[client_id]
+    
+    # Save to file
+    async_server._save_deleted_clients()
+    
+    logger.info(f"Client {client_id} restored from deleted list")
+    
+    # Emit update to web clients
+    socketio.emit('clients_updated', {}, namespace='/')
+    
+    return jsonify({'success': True, 'message': 'Client restored'})
 
 
 @app.route('/api/client/<client_id>/webcam', methods=['POST'])
@@ -533,15 +499,31 @@ def handle_get_clients():
     """Handle get clients request"""
     clients = []
     if async_server:
+        global deleted_clients
+        deleted_clients = async_server.deleted_clients
+        
         for client_id, client_info in async_server.clients.items():
+            # Skip deleted clients
+            if client_id in deleted_clients:
+                continue
+                
             state = client_states.get(client_id, {'disabled': False, 'webcam_active': False, 'control_active': False})
-            # Include all clients, let frontend filter disabled ones
+            # Include all non-deleted clients
             clients.append({
                 'id': client_id,
                 'name': client_info.get('pc_name', client_id),
-                'disabled': state.get('disabled', False)
+                'disabled': state.get('disabled', False),
+                'webcam_active': state.get('webcam_active', False),
+                'control_active': state.get('control_active', False),
+                'display_count': client_info.get('display_count', 1)
             })
     emit('clients_list', {'clients': clients})
+
+
+@socketio.on('clients_updated')
+def handle_clients_updated():
+    """Handle clients updated event - reload clients"""
+    handle_get_clients()
 
 
 @socketio.on('control_input')

