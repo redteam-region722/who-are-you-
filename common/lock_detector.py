@@ -192,6 +192,73 @@ class LockDetector:
             import traceback
             logger.error(traceback.format_exc())
             return (False, f"Unlock error: {str(e)}")
+    
+    def lock(self) -> Tuple[bool, str]:
+        """
+        Lock the Windows machine
+        
+        Returns:
+            (success, message) tuple
+        """
+        if not self.is_windows or not WINDOWS_AVAILABLE:
+            return (False, "Not running on Windows")
+        
+        try:
+            # Check if already locked
+            is_locked, _ = self.is_locked()
+            if is_locked:
+                return (False, "Machine is already locked")
+            
+            # Method 1: Use ctypes to call LockWorkStation API (most reliable)
+            try:
+                # LockWorkStation is in user32.dll, not win32api
+                result = ctypes.windll.user32.LockWorkStation()
+                if result == 0:
+                    # Failed - get error code
+                    error_code = ctypes.get_last_error()
+                    raise OSError(f"LockWorkStation failed with error code: {error_code}")
+                
+                logger.info("Locked Windows using LockWorkStation API")
+                time.sleep(1)  # Wait a moment for lock to take effect
+                
+                # Verify it's locked
+                is_now_locked, _ = self.is_locked()
+                if is_now_locked:
+                    return (True, "Locked successfully")
+                else:
+                    # Fallback to keyboard simulation
+                    logger.warning("LockWorkStation didn't verify as locked, trying keyboard simulation")
+            except Exception as e:
+                logger.warning(f"LockWorkStation API failed: {e}, trying keyboard simulation")
+            
+            # Method 2: Simulate Win+L keypress (fallback)
+            from pynput.keyboard import Controller, Key
+            keyboard = Controller()
+            
+            logger.info("Attempting to lock Windows using Win+L...")
+            
+            # Press Windows key + L
+            keyboard.press(Key.cmd)  # Windows key
+            keyboard.press('l')
+            keyboard.release('l')
+            keyboard.release(Key.cmd)
+            
+            logger.info("Win+L sequence sent")
+            
+            # Wait a moment and check if locked
+            time.sleep(1)
+            is_now_locked, _ = self.is_locked()
+            
+            if is_now_locked:
+                return (True, "Locked successfully")
+            else:
+                return (False, "Lock command sent but machine may not be locked")
+                
+        except Exception as e:
+            logger.error(f"Error during lock: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return (False, f"Lock error: {str(e)}")
 
 
 def is_machine_locked() -> bool:

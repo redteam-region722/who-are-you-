@@ -68,15 +68,26 @@ function renderClientList() {
             lockIndicator = `<span style="color: #ff9800; font-size: 12px; margin-left: 10px;" title="${lockText}">${lockIcon}</span>`;
         }
         
-        // Unlock button (only show if locked and not secure desktop)
-        let unlockButton = '';
+        // Lock/Unlock buttons
+        let lockUnlockButton = '';
         if (client.locked && client.lock_type !== 'secure_desktop') {
-            unlockButton = `
+            // Show unlock button when locked
+            lockUnlockButton = `
                 <button class="btn-unlock" 
                         onclick="showUnlockDialog('${client.id}', '${client.name}')"
                         ${buttonsDisabled}
                         style="${buttonOpacity}">
                     Unlock
+                </button>
+            `;
+        } else if (!client.locked) {
+            // Show lock button when not locked
+            lockUnlockButton = `
+                <button class="btn-lock" 
+                        onclick="lockClient('${client.id}', '${client.name}')"
+                        ${buttonsDisabled}
+                        style="${buttonOpacity}">
+                    Lock
                 </button>
             `;
         }
@@ -91,7 +102,7 @@ function renderClientList() {
                 <span class="client-name">${client.name}${lockIndicator}</span>
             </div>
             <div class="client-actions">
-                ${unlockButton}
+                ${lockUnlockButton}
                 <button class="btn-webcam ${client.webcam_active ? 'active' : ''}" 
                         onclick="toggleWebcam('${client.id}')"
                         ${buttonsDisabled}
@@ -758,6 +769,32 @@ socket.on('webcam_error', (data) => {
     loadClients();
 });
 
+
+// Lock functionality
+function lockClient(clientId, clientName) {
+    if (!confirm(`Lock ${clientName}?`)) {
+        return;
+    }
+    
+    fetch(`/api/client/${clientId}/lock`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'}
+    })
+    .then(res => res.json())
+    .then(data => {
+        if (data.error) {
+            alert('Lock failed: ' + data.error);
+        } else {
+            alert('Lock request sent. Machine should lock shortly...');
+            // Reload clients after a moment to update lock status
+            setTimeout(() => loadClients(), 2000);
+        }
+    })
+    .catch(err => {
+        console.error('Error sending lock request:', err);
+        alert('Error sending lock request');
+    });
+}
 
 // Unlock functionality
 function showUnlockDialog(clientId, clientName) {

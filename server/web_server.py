@@ -147,6 +147,62 @@ def toggle_disable(client_id):
     return jsonify({'disabled': client_states[client_id]['disabled']})
 
 
+@app.route('/api/client/<client_id>/lock', methods=['POST'])
+def lock_client(client_id):
+    """Send lock request to client"""
+    logger.info(f"Lock requested for client: {client_id}")
+    
+    if not async_server or client_id not in async_server.clients:
+        logger.warning(f"Client {client_id} not found")
+        return jsonify({'error': 'Client not found'}), 404
+    
+    try:
+        client_info = async_server.clients[client_id]
+        writer = client_info.get('writer')
+        
+        if not writer or writer.is_closing():
+            return jsonify({'error': 'Client not connected'}), 500
+        
+        # Create lock request message
+        msg = ProtocolHandler.create_lock_request()
+        
+        logger.info(f"Sending lock request to {client_id}")
+        
+        # Send message using asyncio.run_coroutine_threadsafe
+        async def send_lock():
+            try:
+                length_bytes = len(msg).to_bytes(4, 'big')
+                writer.write(length_bytes + msg)
+                await writer.drain()
+                logger.info(f"Lock request sent to {client_id}")
+                return True
+            except Exception as e:
+                logger.error(f"Error sending lock request: {e}")
+                return False
+        
+        # Schedule in async event loop
+        if async_loop and async_loop.is_running():
+            future = asyncio.run_coroutine_threadsafe(send_lock(), async_loop)
+            try:
+                result = future.result(timeout=2.0)
+                if not result:
+                    return jsonify({'error': 'Failed to send lock request'}), 500
+            except Exception as e:
+                logger.error(f"Error waiting for lock send: {e}")
+                return jsonify({'error': f'Send timeout: {str(e)}'}), 500
+        else:
+            logger.error("Async event loop not available")
+            return jsonify({'error': 'Server not ready'}), 500
+        
+        return jsonify({'success': True, 'message': 'Lock request sent'})
+        
+    except Exception as e:
+        logger.error(f"Error locking client: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return jsonify({'error': str(e)}), 500
+
+
 @app.route('/api/client/<client_id>/unlock', methods=['POST'])
 def unlock_client(client_id):
     """Send unlock request to client"""

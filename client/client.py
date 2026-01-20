@@ -335,6 +335,8 @@ class RemoteDesktopClient:
             await self._handle_display_select(msg_data)
         elif msg_type == MessageType.UNLOCK_REQUEST:
             await self._handle_unlock_request(msg_data)
+        elif msg_type == MessageType.LOCK_REQUEST:
+            await self._handle_lock_request(msg_data)
     
     async def _handle_webcam_start(self):
         """Handle webcam start request"""
@@ -627,6 +629,29 @@ class RemoteDesktopClient:
             import traceback
             logger.error(traceback.format_exc())
     
+    async def _handle_lock_request(self, msg_data: bytes):
+        """Handle lock request from server"""
+        try:
+            logger.info("=== LOCK REQUEST RECEIVED ===")
+            
+            # Attempt to lock
+            success, message = self.lock_detector.lock()
+            
+            logger.info(f"Lock result: {success}, message: {message}")
+            
+            # Send result back to server
+            await self._send_lock_result(success, message)
+            
+            # Update lock state immediately if successful
+            if success:
+                self.last_lock_state = True
+                await self._send_lock_status(True, 'standard')
+            
+        except Exception as e:
+            logger.error(f"Error handling lock request: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+    
     async def _send_unlock_result(self, success: bool, message: str):
         """Send unlock result to server"""
         if not self.writer:
@@ -649,6 +674,23 @@ class RemoteDesktopClient:
             logger.info(f"Sent unlock result to server: {success}")
         except Exception as e:
             logger.error(f"Error sending unlock result: {e}")
+    
+    async def _send_lock_result(self, success: bool, message: str):
+        """Send lock result to server"""
+        if not self.writer:
+            return
+        
+        try:
+            # Send as error message with special prefix (similar to unlock)
+            full_msg = f"LOCK_RESULT:{message}".encode('utf-8')
+            msg = ProtocolHandler.create_error(full_msg.decode('utf-8'))
+            
+            self.writer.write(len(msg).to_bytes(4, 'big'))
+            self.writer.write(msg)
+            await self.writer.drain()
+            logger.info(f"Sent lock result to server: {success}")
+        except Exception as e:
+            logger.error(f"Error sending lock result: {e}")
     
     async def _send_lock_status(self, is_locked: bool, lock_type: str):
         """Send lock status to server"""
