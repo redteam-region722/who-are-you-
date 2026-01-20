@@ -64,6 +64,20 @@ def init_web_server(server_instance, event_loop=None):
     
     async_server.webcam_error_callback = webcam_error_handler
     
+    # Set up new client connection callback
+    def new_client_handler(pc_name, client_id):
+        """Handle new client connections - emit to web clients"""
+        try:
+            socketio.emit('new_client_connected', {
+                'pc_name': pc_name,
+                'client_id': client_id,
+                'message': f'New client connected: {pc_name}'
+            }, namespace='/')
+            logger.info(f"Emitted new client event to web clients: {pc_name} ({client_id})")
+        except Exception as e:
+            logger.error(f"Error emitting new client event: {e}")
+    
+    async_server.new_client_callback = new_client_handler
 
 
 @app.route('/')

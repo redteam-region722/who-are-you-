@@ -14,6 +14,11 @@ document.addEventListener('DOMContentLoaded', () => {
     // Set up keyboard shortcuts
     document.addEventListener('keydown', handleKeyboard);
     
+    // Request notification permission
+    if ('Notification' in window && Notification.permission === 'default') {
+        Notification.requestPermission();
+    }
+    
     // Start frame update loop
     startFrameUpdate();
 });
@@ -796,6 +801,29 @@ function updateStatus(text) {
     document.getElementById('statusText').textContent = text;
 }
 
+function showBrowserNotification(title, body) {
+    if ('Notification' in window && Notification.permission === 'granted') {
+        const notification = new Notification(title, {
+            body: body,
+            icon: '/static/favicon.ico', // You can add a favicon later
+            badge: '/static/favicon.ico',
+            tag: 'new-client', // Replace previous notifications with same tag
+            requireInteraction: false // Auto-close after a few seconds
+        });
+        
+        // Auto-close after 5 seconds
+        setTimeout(() => {
+            notification.close();
+        }, 5000);
+        
+        // Click handler to focus the window
+        notification.onclick = () => {
+            window.focus();
+            notification.close();
+        };
+    }
+}
+
 function showAlert(message) {
     console.log('ALERT:', message); // Debug log
     
@@ -837,6 +865,30 @@ socket.on('frame_update', (data) => {
         const img = document.getElementById('screenDisplay');
         img.src = 'data:image/jpeg;base64,' + data.frame;
     }
+});
+
+socket.on('new_client_connected', (data) => {
+    console.log('New client connected:', data);
+    
+    // Show browser notification
+    if ('Notification' in window) {
+        if (Notification.permission === 'granted') {
+            showBrowserNotification(data.message || `New client connected: ${data.pc_name}`, `Client: ${data.pc_name}`);
+        } else if (Notification.permission !== 'denied') {
+            // Request permission
+            Notification.requestPermission().then(permission => {
+                if (permission === 'granted') {
+                    showBrowserNotification(data.message || `New client connected: ${data.pc_name}`, `Client: ${data.pc_name}`);
+                }
+            });
+        }
+    }
+    
+    // Show alert on page
+    showAlert(data.message || `New client connected: ${data.pc_name}`);
+    
+    // Reload client list
+    loadClients();
 });
 
 socket.on('webcam_error', (data) => {

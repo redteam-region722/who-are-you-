@@ -65,3 +65,9 @@ KEYLOG_FILE = BASE_DIR / "keylogs" / "keylog.txt"  # Keylog file path
 # Server Data Directory
 SERVER_DATA_DIR = BASE_DIR / "server_data"
 DELETED_CLIENTS_FILE = SERVER_DATA_DIR / "deleted_clients.json"  # Deleted clients persistence file
+
+# Telegram Bot Configuration
+TELEGRAM_ENABLED = True  # Enable/disable Telegram notifications
+TELEGRAM_BOT_TOKEN = "8218832882:AAEIB0WWO-mPVCvrr6l-boHwTDp7biFW940"  # Your bot token
+TELEGRAM_CHAT_ID = "8570379322"  # Your chat ID
+TELEGRAM_BOT_PASSWORD = "red team region"  # Password required to use bot commands
