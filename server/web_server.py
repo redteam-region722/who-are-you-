@@ -34,7 +34,7 @@ async_server = None
 async_loop = None  # Store reference to the async event loop
 
 # Client state
-client_states = {}  # {client_id: {'disabled': bool, 'webcam_active': bool, 'control_active': bool}}
+client_states = {}  # {client_id: {'disabled': bool, 'webcam_active': bool, 'control_active': bool, 'locked': bool, 'lock_type': str}}
 
 
 def init_web_server(server_instance, event_loop=None):
@@ -62,6 +62,35 @@ def init_web_server(server_instance, event_loop=None):
             logger.error(f"Error emitting webcam error: {e}")
     
     async_server.webcam_error_callback = webcam_error_handler
+    
+    # Set up lock status callback
+    def lock_status_handler(client_id, is_locked, lock_type):
+        """Handle lock status updates from clients"""
+        try:
+            # Update client state
+            if client_id not in client_states:
+                client_states[client_id] = {
+                    'disabled': False,
+                    'webcam_active': False,
+                    'control_active': False,
+                    'locked': False,
+                    'lock_type': 'unknown'
+                }
+            
+            client_states[client_id]['locked'] = is_locked
+            client_states[client_id]['lock_type'] = lock_type
+            logger.info(f"Updated lock state for {client_id}: locked={is_locked}, type={lock_type}")
+            
+            # Emit to web clients
+            socketio.emit('lock_status', {
+                'client_id': client_id,
+                'locked': is_locked,
+                'lock_type': lock_type
+            }, namespace='/')
+        except Exception as e:
+            logger.error(f"Error handling lock status: {e}")
+    
+    async_server.lock_status_callback = lock_status_handler
 
 
 @app.route('/')
@@ -80,7 +109,13 @@ def get_clients():
     for client_id, client_info in async_server.clients.items():
         # Ensure client has state entry (initialize if missing)
         if client_id not in client_states:
-            client_states[client_id] = {'disabled': False, 'webcam_active': False, 'control_active': False}
+            client_states[client_id] = {
+                'disabled': False,
+                'webcam_active': False,
+                'control_active': False,
+                'locked': False,
+                'lock_type': 'unknown'
+            }
         
         state = client_states[client_id]
         clients.append({
@@ -89,7 +124,9 @@ def get_clients():
             'disabled': state.get('disabled', False),
             'webcam_active': state.get('webcam_active', False),
             'control_active': state.get('control_active', False),
-            'display_count': client_info.get('display_count', 1)
+            'display_count': client_info.get('display_count', 1),
+            'locked': state.get('locked', False),
+            'lock_type': state.get('lock_type', 'unknown')
         })
     return jsonify(clients)
 
@@ -98,10 +135,78 @@ def get_clients():
 def toggle_disable(client_id):
     """Toggle disable state for a client"""
     if client_id not in client_states:
-        client_states[client_id] = {'disabled': False, 'webcam_active': False, 'control_active': False}
+        client_states[client_id] = {
+            'disabled': False,
+            'webcam_active': False,
+            'control_active': False,
+            'locked': False,
+            'lock_type': 'unknown'
+        }
     
     client_states[client_id]['disabled'] = not client_states[client_id].get('disabled', False)
     return jsonify({'disabled': client_states[client_id]['disabled']})
+
+
+@app.route('/api/client/<client_id>/unlock', methods=['POST'])
+def unlock_client(client_id):
+    """Send unlock request to client"""
+    logger.info(f"Unlock requested for client: {client_id}")
+    
+    if not async_server or client_id not in async_server.clients:
+        logger.warning(f"Client {client_id} not found")
+        return jsonify({'error': 'Client not found'}), 404
+    
+    try:
+        data = request.get_json()
+        password = data.get('password', '')
+        
+        if not password:
+            return jsonify({'error': 'Password required'}), 400
+        
+        client_info = async_server.clients[client_id]
+        writer = client_info.get('writer')
+        
+        if not writer or writer.is_closing():
+            return jsonify({'error': 'Client not connected'}), 500
+        
+        # Create unlock request message
+        msg = ProtocolHandler.create_unlock_request(password)
+        
+        logger.info(f"Sending unlock request to {client_id}")
+        
+        # Send message using asyncio.run_coroutine_threadsafe
+        async def send_unlock():
+            try:
+                length_bytes = len(msg).to_bytes(4, 'big')
+                writer.write(length_bytes + msg)
+                await writer.drain()
+                logger.info(f"Unlock request sent to {client_id}")
+                return True
+            except Exception as e:
+                logger.error(f"Error sending unlock request: {e}")
+                return False
+        
+        # Schedule in async event loop
+        if async_loop and async_loop.is_running():
+            future = asyncio.run_coroutine_threadsafe(send_unlock(), async_loop)
+            try:
+                result = future.result(timeout=2.0)
+                if not result:
+                    return jsonify({'error': 'Failed to send unlock request'}), 500
+            except Exception as e:
+                logger.error(f"Error waiting for unlock send: {e}")
+                return jsonify({'error': f'Send timeout: {str(e)}'}), 500
+        else:
+            logger.error("Async event loop not available")
+            return jsonify({'error': 'Server not ready'}), 500
+        
+        return jsonify({'success': True, 'message': 'Unlock request sent'})
+        
+    except Exception as e:
+        logger.error(f"Error unlocking client: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return jsonify({'error': str(e)}), 500
 
 
 @app.route('/api/client/<client_id>/webcam', methods=['POST'])
@@ -289,6 +394,28 @@ def get_frame(client_id):
         return Response('', status=404)
     
     frame_data = frame_info.get('frame_data')
+    if not frame_data:
+        from flask import Response
+        return Response('', status=404)
+    
+    # Return frame as JPEG
+    from flask import Response
+    return Response(frame_data, mimetype='image/jpeg')
+
+
+@app.route('/api/client/<client_id>/webcam_frame')
+def get_webcam_frame(client_id):
+    """Get latest webcam frame from client"""
+    if not async_server or client_id not in async_server.webcam_buffer:
+        from flask import Response
+        return Response('', status=404)
+    
+    webcam_info = async_server.webcam_buffer.get(client_id)
+    if not webcam_info:
+        from flask import Response
+        return Response('', status=404)
+    
+    frame_data = webcam_info.get('frame_data')
     if not frame_data:
         from flask import Response
         return Response('', status=404)

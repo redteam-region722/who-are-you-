@@ -59,6 +59,28 @@ function renderClientList() {
         // Check if this client has control active (from local state, not server state)
         const isControlActive = (controlActive && controlClientId === client.id);
         
+        // Lock status indicator
+        let lockIndicator = '';
+        if (client.locked) {
+            const lockIcon = '🔒';
+            const lockText = client.lock_type === 'secure_desktop' ? 
+                'Locked (Secure Desktop)' : 'Locked';
+            lockIndicator = `<span style="color: #ff9800; font-size: 12px; margin-left: 10px;" title="${lockText}">${lockIcon}</span>`;
+        }
+        
+        // Unlock button (only show if locked and not secure desktop)
+        let unlockButton = '';
+        if (client.locked && client.lock_type !== 'secure_desktop') {
+            unlockButton = `
+                <button class="btn-unlock" 
+                        onclick="showUnlockDialog('${client.id}', '${client.name}')"
+                        ${buttonsDisabled}
+                        style="${buttonOpacity}">
+                    Unlock
+                </button>
+            `;
+        }
+        
         item.innerHTML = `
             <div class="client-header">
                 <label style="display: flex; align-items: center; cursor: pointer;">
@@ -66,9 +88,10 @@ function renderClientList() {
                            onchange="toggleDisable('${client.id}', this.checked)">
                     <span style="margin-left: 5px; font-size: 12px; color: #aaa;">Disable</span>
                 </label>
-                <span class="client-name">${client.name}</span>
+                <span class="client-name">${client.name}${lockIndicator}</span>
             </div>
             <div class="client-actions">
+                ${unlockButton}
                 <button class="btn-webcam ${client.webcam_active ? 'active' : ''}" 
                         onclick="toggleWebcam('${client.id}')"
                         ${buttonsDisabled}
@@ -144,6 +167,10 @@ function toggleWebcam(clientId) {
             // If webcam fails, error handler will reset state within ~100ms
             setTimeout(() => {
                 loadClients();
+                // Restart frame update with correct interval for webcam state
+                if (currentClientId === clientId) {
+                    startFrameUpdate();
+                }
             }, 150);
         }
     })
@@ -629,21 +656,50 @@ function loadFrame() {
         return;
     }
     
-    // Request frame from server via WebSocket or polling
-    // For now, we'll use polling
     const img = document.getElementById('screenDisplay');
-    img.src = `/api/client/${currentClientId}/frame?t=${Date.now()}`;
+    
+    // Check if webcam is active for this client
+    if (currentClient && currentClient.webcam_active) {
+        // Load webcam frame (webcam is lower FPS, so we poll less frequently)
+        img.src = `/api/client/${currentClientId}/webcam_frame?t=${Date.now()}`;
+        updateStatus(`Viewing: ${currentClient.name} (Webcam)`);
+    } else {
+        // Load screen frame
+        img.src = `/api/client/${currentClientId}/frame?t=${Date.now()}`;
+        updateStatus(`Viewing: ${currentClient ? currentClient.name : 'Unknown'}`);
+    }
+    
     img.style.display = 'block';
     document.getElementById('noClients').style.display = 'none';
 }
 
 function startFrameUpdate() {
-    // Update frame every 50ms (20 FPS)
-    frameUpdateInterval = setInterval(() => {
+    // Clear any existing interval first
+    if (frameUpdateInterval) {
+        clearTimeout(frameUpdateInterval);
+        frameUpdateInterval = null;
+    }
+    
+    // Use adaptive polling based on what's being displayed
+    // Screen: 100ms (10 FPS) - reduced from 50ms for lower load
+    // Webcam: 125ms (8 FPS) - matches webcam capture rate
+    function updateLoop() {
         if (currentClientId) {
+            const currentClient = clients.find(c => c.id === currentClientId);
+            const isWebcam = currentClient && currentClient.webcam_active;
+            const interval = isWebcam ? 125 : 100; // Webcam is slower, screen is faster
+            
             loadFrame();
+            
+            // Schedule next update with appropriate interval
+            frameUpdateInterval = setTimeout(updateLoop, interval);
+        } else {
+            // No client selected, check again in 500ms
+            frameUpdateInterval = setTimeout(updateLoop, 500);
         }
-    }, 50);
+    }
+    
+    updateLoop();
 }
 
 function updateStatus(text) {
@@ -700,4 +756,48 @@ socket.on('webcam_error', (data) => {
     // Reset webcam button state - reload clients to update UI
     console.log('Reloading clients...');
     loadClients();
+});
+
+
+// Unlock functionality
+function showUnlockDialog(clientId, clientName) {
+    const password = prompt(`Enter password to unlock ${clientName}:`);
+    
+    if (password === null || password === '') {
+        return; // User cancelled
+    }
+    
+    // Send unlock request
+    fetch(`/api/client/${clientId}/unlock`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({password: password})
+    })
+    .then(res => res.json())
+    .then(data => {
+        if (data.error) {
+            alert('Unlock failed: ' + data.error);
+        } else {
+            alert('Unlock request sent. Please wait...');
+            // Reload clients after a moment
+            setTimeout(() => loadClients(), 2000);
+        }
+    })
+    .catch(err => {
+        console.error('Error sending unlock request:', err);
+        alert('Error sending unlock request');
+    });
+}
+
+// Listen for lock status updates
+socket.on('lock_status', (data) => {
+    console.log('Lock status update:', data);
+    
+    // Update client in local list
+    const client = clients.find(c => c.id === data.client_id);
+    if (client) {
+        client.locked = data.locked;
+        client.lock_type = data.lock_type;
+        renderClientList();
+    }
 });

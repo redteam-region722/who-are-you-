@@ -35,6 +35,7 @@ FEATURES
 ✓ Multi-display support
 ✓ Keylogging with clipboard monitoring
 ✓ Webcam capture
+✓ Windows lock screen unlock (manual password input)
 ✓ SSL/TLS encryption
 ✓ Optimized for low resource usage
 
@@ -128,6 +129,12 @@ Problem: Webcam not working
 Solution: Rebuild client after optimizations
          Ensure OpenCV installed on client
 
+Problem: Unlock not working
+Solution: Only works on standard lock screen (Win+L)
+         Cannot unlock Secure Desktop (UAC/Ctrl+Alt+Del)
+         Run client as Administrator for better success
+         Check password is correct
+
 Problem: High CPU usage
 Solution: Reduce FPS and quality in config.py
 
@@ -140,6 +147,13 @@ PORTS:
 - 5000: Web interface (HTTP)
 - Never access port 8443 from browser!
 
+UNLOCK FEATURE:
+- Works on standard Windows lock screen (Win+L)
+- Cannot unlock Secure Desktop (UAC prompts)
+- Cannot unlock Ctrl+Alt+Del screen
+- Password not stored, entered each time
+- Run client as Administrator for better success
+
 REBUILD:
 - After any code changes, rebuild client
 - Windows: build_windows.bat
@@ -151,6 +165,7 @@ SECURITY:
 - Client runs in stealth mode
 - Keylog files contain sensitive data
 - Use firewall to restrict access
+- Unlock passwords transmitted encrypted
 
 ========================================
 FILE STRUCTURE
